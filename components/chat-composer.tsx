@@ -24,6 +24,7 @@ import {
   InputGroupButton,
   InputGroupTextarea,
 } from "@/components/ui/input-group"
+import { createGame } from "@/lib/games/action"
 
 const models = ["Kimi K3", "Claude Opus 5", "GPT-5", "Gemini 3 Pro"]
 
@@ -39,9 +40,11 @@ const suggestions = [
 
 export function ChatComposer() {
   return (
-    <div className="flex w-full flex-col gap-6">
+    <form action={createGame} className="flex w-full flex-col gap-6">
       <InputGroup className="bg-popover">
         <InputGroupTextarea
+          name="prompt"
+          required
           placeholder="Describe the game you want to build…"
           rows={1}
           className="field-sizing-content max-h-48 min-h-10"
@@ -63,7 +66,7 @@ export function ChatComposer() {
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button size="icon-lg" className="ml-auto rounded-full">
+          <Button type="submit" size="icon-lg" className="ml-auto rounded-full">
             <ArrowUpIcon />
           </Button>
         </InputGroupAddon>
@@ -72,6 +75,7 @@ export function ChatComposer() {
         {suggestions.map((suggestion) => (
           <Button
             key={suggestion.label}
+            type="button"
             variant="outline"
             size="sm"
             className="rounded-full font-normal text-muted-foreground"
@@ -81,6 +85,6 @@ export function ChatComposer() {
           </Button>
         ))}
       </div>
-    </div>
+    </form>
   )
 }
