@@ -1,3 +1,6 @@
+"use client"
+
+import { useState } from "react"
 import Image from "next/image"
 
 import { ChatComposer } from "@/components/chat-composer"
@@ -49,6 +52,14 @@ const messages = [
 ]
 
 export function ChatThread() {
+  const [value, setValue] = useState("")
+
+  // TODO: replace with the real chat transport.
+  function sendMessage(message: string) {
+    console.log(message)
+    setValue("")
+  }
+
   return (
     <div className="flex h-svh flex-col">
       <MessageScrollerProvider>
@@ -87,7 +98,11 @@ export function ChatThread() {
         </MessageScroller>
       </MessageScrollerProvider>
       <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-4">
-        <ChatComposer />
+        <ChatComposer
+          value={value}
+          onValueChange={setValue}
+          onSubmit={sendMessage}
+        />
       </div>
     </div>
   )

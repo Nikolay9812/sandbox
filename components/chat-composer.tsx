@@ -13,17 +13,43 @@ import {
   InputGroupButton,
   InputGroupTextarea,
 } from "@/components/ui/input-group"
-import { createGame } from "@/lib/games/action"
 
 const models = ["Kimi K3", "Claude Opus 5", "GPT-5", "Gemini 3 Pro"]
 
-export function ChatComposer() {
+type ChatComposerProps = {
+  value: string
+  onValueChange: (value: string) => void
+  onSubmit: (value: string) => void
+  disabled?: boolean
+}
+
+export function ChatComposer({
+  value,
+  onValueChange,
+  onSubmit,
+  disabled,
+}: ChatComposerProps) {
   return (
-    <form action={createGame} className="w-full">
+    <form
+      className="w-full"
+      onSubmit={(event) => {
+        event.preventDefault()
+
+        const prompt = value.trim()
+
+        if (!prompt || disabled) {
+          return
+        }
+
+        onSubmit(prompt)
+      }}
+    >
       <InputGroup className="bg-popover">
         <InputGroupTextarea
           name="prompt"
           required
+          value={value}
+          onChange={(event) => onValueChange(event.target.value)}
           placeholder="Describe the game you want to build…"
           rows={1}
           className="field-sizing-content max-h-48 min-h-10"
@@ -45,7 +71,12 @@ export function ChatComposer() {
               ))}
             </DropdownMenuContent>
           </DropdownMenu>
-          <Button type="submit" size="icon-lg" className="ml-auto rounded-full">
+          <Button
+            type="submit"
+            size="icon-lg"
+            disabled={disabled || !value.trim()}
+            className="ml-auto rounded-full"
+          >
             <ArrowUpIcon />
           </Button>
         </InputGroupAddon>

@@ -6,14 +6,14 @@ import { revalidatePath } from "next/cache"
 import { db } from "@/lib/db"
 import { games } from "@/lib/db/schema"
 
-export async function createGame(formData: FormData) {
+export async function createGame(prompt: string) {
   const { orgId } = await auth.protect()
 
   if (!orgId) {
     throw new Error("An active organization is required to create a game")
   }
 
-  const title = String(formData.get("prompt") ?? "").trim()
+  const title = prompt.trim()
 
   if (!title) {
     return
