@@ -1,5 +1,10 @@
-export default async function Page({ params }: PageProps<"/games/[id]">) {
-  const { id } = await params
+import { auth } from "@clerk/nextjs/server"
 
-  return <p>{id}</p>
+import { ChatThread } from "@/components/chat-thread"
+import { unauthorized } from "next/navigation"
+
+export default async function GamePage() {
+  await auth.protect({ unauthorizedUrl: "/sign-in"})
+
+  return <ChatThread />
 }
