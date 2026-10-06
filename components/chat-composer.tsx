@@ -1,15 +1,4 @@
-import {
-  ArrowUpIcon,
-  BrushIcon,
-  CarIcon,
-  ChevronDownIcon,
-  CrosshairIcon,
-  Gamepad2Icon,
-  GripIcon,
-  PickaxeIcon,
-  PlaneIcon,
-  ZapIcon,
-} from "lucide-react"
+import { ArrowUpIcon, ChevronDownIcon, GripIcon } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -28,19 +17,9 @@ import { createGame } from "@/lib/games/action"
 
 const models = ["Kimi K3", "Claude Opus 5", "GPT-5", "Gemini 3 Pro"]
 
-const suggestions = [
-  { label: "Voxel survival", icon: PickaxeIcon },
-  { label: "Ink samurai duel", icon: BrushIcon },
-  { label: "Comic-book firefight", icon: ZapIcon },
-  { label: "Realistic battlefield", icon: PlaneIcon },
-  { label: "Fight-first shooter", icon: CrosshairIcon },
-  { label: "Jungle expedition drive", icon: CarIcon },
-  { label: "Sunny kingdom platformer", icon: Gamepad2Icon },
-]
-
 export function ChatComposer() {
   return (
-    <form action={createGame} className="flex w-full flex-col gap-6">
+    <form action={createGame} className="w-full">
       <InputGroup className="bg-popover">
         <InputGroupTextarea
           name="prompt"
@@ -71,20 +50,6 @@ export function ChatComposer() {
           </Button>
         </InputGroupAddon>
       </InputGroup>
-      <div className="flex flex-wrap justify-center gap-2">
-        {suggestions.map((suggestion) => (
-          <Button
-            key={suggestion.label}
-            type="button"
-            variant="outline"
-            size="sm"
-            className="rounded-full font-normal text-muted-foreground"
-          >
-            <suggestion.icon />
-            {suggestion.label}
-          </Button>
-        ))}
-      </div>
     </form>
   )
 }
