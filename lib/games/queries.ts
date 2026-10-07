@@ -1,6 +1,7 @@
 import "server-only"
 
 import { auth } from "@clerk/nextjs/server"
+import type { UIMessage } from "ai"
 import { and, desc, eq } from "drizzle-orm"
 
 import { db } from "@/lib/db"
@@ -34,7 +35,7 @@ export async function getGame(id: string) {
   }
 
   const [game] = await db
-    .select({ id: games.id, title: games.title })
+    .select({ id: games.id, title: games.title, messages: games.messages })
     .from(games)
     .where(and(eq(games.id, id), eq(games.orgId, orgId)))
     .limit(1)
@@ -43,3 +44,9 @@ export async function getGame(id: string) {
 }
 
 export type Game = NonNullable<Awaited<ReturnType<typeof getGame>>>
+
+// Callers must have checked access with getGame first: this can run after the
+// response has started streaming, outside the request's auth context.
+export async function saveGameMessages(id: string, messages: UIMessage[]) {
+  await db.update(games).set({ messages }).where(eq(games.id, id))
+}

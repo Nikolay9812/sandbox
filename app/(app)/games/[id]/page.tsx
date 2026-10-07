@@ -14,5 +14,12 @@ export default async function GamePage(props: PageProps<"/games/[id]">) {
     notFound()
   }
 
-  return <ChatThread />
+  // Keyed so switching games resets the thread instead of reusing its state
+  return (
+    <ChatThread
+      key={game.id}
+      gameId={game.id}
+      initialMessages={game.messages}
+    />
+  )
 }

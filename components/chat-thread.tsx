@@ -3,6 +3,7 @@
 import { useState } from "react"
 import Image from "next/image"
 import { useChat } from "@ai-sdk/react"
+import { DefaultChatTransport, type UIMessage } from "ai"
 
 import { ChatComposer } from "@/components/chat-composer"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
@@ -16,9 +17,25 @@ import {
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller"
 
-export function ChatThread() {
+export function ChatThread({
+  gameId,
+  initialMessages,
+}: {
+  gameId: string
+  initialMessages: UIMessage[]
+}) {
   const [value, setValue] = useState("")
-  const { messages, sendMessage, status } = useChat()
+  const { messages, sendMessage, status } = useChat({
+    id: gameId,
+    messages: initialMessages,
+    transport: new DefaultChatTransport({
+      api: "/api/chat",
+      // The server holds the thread, so only send the new message.
+      prepareSendMessagesRequest({ id, messages }) {
+        return { body: { id, message: messages[messages.length - 1] } }
+      },
+    }),
+  })
 
   function handleSubmit(text: string) {
     sendMessage({ text })
