@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import Image from "next/image"
 import { useChat } from "@ai-sdk/react"
 import { DefaultChatTransport, type UIMessage } from "ai"
@@ -10,7 +10,6 @@ import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { Message, MessageAvatar, MessageContent } from "@/components/ui/message"
 import {
   MessageScroller,
-  MessageScrollerButton,
   MessageScrollerContent,
   MessageScrollerItem,
   MessageScrollerProvider,
@@ -25,17 +24,29 @@ export function ChatThread({
   initialMessages: UIMessage[]
 }) {
   const [value, setValue] = useState("")
-  const { messages, sendMessage, status } = useChat({
+  // The default transport sends `{ id, messages }`, the full thread the chat
+  // route expects.
+  const { messages, sendMessage, regenerate, status } = useChat({
     id: gameId,
     messages: initialMessages,
-    transport: new DefaultChatTransport({
-      api: "/api/chat",
-      // The server holds the thread, so only send the new message.
-      prepareSendMessagesRequest({ id, messages }) {
-        return { body: { id, message: messages[messages.length - 1] } }
-      },
-    }),
+    transport: new DefaultChatTransport({ api: "/api/chat" }),
   })
+
+  // A new game arrives holding only the prompt it was created from, so ask for
+  // the reply here. The ref keeps Strict Mode's double mount from asking twice.
+  const requestedReply = useRef(false)
+
+  useEffect(() => {
+    if (requestedReply.current) {
+      return
+    }
+
+    requestedReply.current = true
+
+    if (initialMessages.at(-1)?.role === "user") {
+      regenerate()
+    }
+  }, [initialMessages, regenerate])
 
   function handleSubmit(text: string) {
     sendMessage({ text })
