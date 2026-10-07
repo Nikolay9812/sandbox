@@ -1,18 +1,26 @@
 import "server-only"
 
-import { attachDatabasePool } from "@vercel/functions"
+import { parseEnv } from "@neon/env"
 import { drizzle } from "drizzle-orm/node-postgres"
 import { Pool } from "pg"
 
+import neonConfig from "@/neon"
+
 import * as schema from "./schema"
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL is not set")
+// Pooled connection (PgBouncer) — the right one for request traffic.
+const { postgres } = parseEnv(neonConfig, ["DATABASE_URL"])
+
+// Reuse the pool across hot reloads in dev so we don't exhaust connections.
+const globalForDb = globalThis as unknown as { pool?: Pool }
+
+const pool =
+  globalForDb.pool ?? new Pool({ connectionString: postgres.databaseUrl })
+
+if (process.env.NODE_ENV !== "production") {
+  globalForDb.pool = pool
 }
 
-// Pooled connection for app traffic. The pool is reused across requests on
-// Vercel Fluid compute; attachDatabasePool closes idle clients before suspend.
-const pool = new Pool({ connectionString: process.env.DATABASE_URL })
-attachDatabasePool(pool)
+export const db = drizzle(pool, { schema })
 
-export const db = drizzle({ client: pool, schema })
+export * from "./schema"
