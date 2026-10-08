@@ -3,7 +3,9 @@
 import { useEffect, useRef, useState } from "react"
 import Image from "next/image"
 import { useChat } from "@ai-sdk/react"
-import { DefaultChatTransport, type UIMessage } from "ai"
+import type { ChatSessionPersistedState } from "@trigger.dev/sdk/chat"
+import { useTriggerChatTransport } from "@trigger.dev/sdk/chat/react"
+import type { UIMessage } from "ai"
 
 import { ChatComposer } from "@/components/chat-composer"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
@@ -15,21 +17,37 @@ import {
   MessageScrollerProvider,
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller"
+import {
+  mintGameChatAccessToken,
+  startGameChatSession,
+} from "@/lib/games/chat-actions"
+import type { gameChat } from "@/trigger/chat"
 
 export function ChatThread({
   gameId,
   initialMessages,
+  initialSessions,
 }: {
   gameId: string
   initialMessages: UIMessage[]
+  initialSessions?: Record<string, ChatSessionPersistedState>
 }) {
   const [value, setValue] = useState("")
-  // The default transport sends `{ id, messages }`, the full thread the chat
-  // route expects.
+  // Talks to the `game-chat` agent directly. Only the new message goes on the
+  // wire; the agent reads the rest of the thread from the game.
+  const transport = useTriggerChatTransport<typeof gameChat>({
+    task: "game-chat",
+    accessToken: ({ chatId }) => mintGameChatAccessToken(chatId),
+    startSession: ({ chatId, clientData }) =>
+      startGameChatSession({ chatId, clientData }),
+    sessions: initialSessions,
+  })
   const { messages, sendMessage, regenerate, status } = useChat({
     id: gameId,
     messages: initialMessages,
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    transport,
+    // Reconnect to a reply that was still streaming when the page loaded.
+    resume: initialSessions !== undefined,
   })
 
   // A new game arrives holding only the prompt it was created from, so ask for
