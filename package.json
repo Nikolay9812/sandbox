@@ -11,7 +11,9 @@
     "format": "prettier --write \"**/*.{ts,tsx}\"",
     "typecheck": "tsc --noEmit",
     "db:studio": "drizzle-kit studio",
-    "db:push": "drizzle-kit push"
+    "db:push": "drizzle-kit push",
+    "trigger:dev": "trigger dev",
+    "trigger:deploy": "trigger deploy"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^4.0.72",
@@ -22,6 +24,7 @@
     "@neon/config": "^1.8.4",
     "@neon/env": "^1.5.1",
     "@shadcn/react": "^0.3.0",
+    "@trigger.dev/sdk": "4.7.3",
     "@vercel/functions": "^3.9.11",
     "ai": "^7.0.128",
     "class-variance-authority": "^0.7.1",
@@ -47,6 +50,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@trigger.dev/build": "4.7.3",
     "@types/node": "^20",
     "@types/pg": "^8.23.1",
     "@types/react": "^19",
@@ -58,6 +62,7 @@
     "prettier": "^3.8.3",
     "prettier-plugin-tailwindcss": "^0.8.0",
     "tailwindcss": "^4",
+    "trigger.dev": "^4.7.3",
     "typescript": "^5"
   }
 }
