@@ -1,17 +1,18 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
-import Image from "next/image"
 import { useChat } from "@ai-sdk/react"
 import type { ChatSessionPersistedState } from "@trigger.dev/sdk/chat"
 import { useTriggerChatTransport } from "@trigger.dev/sdk/chat/react"
 import type { UIMessage } from "ai"
+import Image from "next/image"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { ChatComposer } from "@/components/chat-composer"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { Message, MessageAvatar, MessageContent } from "@/components/ui/message"
 import {
   MessageScroller,
+  MessageScrollerButton,
   MessageScrollerContent,
   MessageScrollerItem,
   MessageScrollerProvider,
@@ -21,55 +22,87 @@ import {
   mintGameChatAccessToken,
   startGameChatSession,
 } from "@/lib/games/chat-actions"
+// Type-only: the agent module reaches the server bundle, never the browser.
 import type { gameChat } from "@/trigger/chat"
 
 export function ChatThread({
   gameId,
   initialMessages,
-  initialSessions,
+  initialSession,
 }: {
   gameId: string
   initialMessages: UIMessage[]
-  initialSessions?: Record<string, ChatSessionPersistedState>
+  initialSession?: ChatSessionPersistedState
 }) {
-  const [value, setValue] = useState("")
-  // Talks to the `game-chat` agent directly. Only the new message goes on the
-  // wire; the agent reads the rest of the thread from the game.
+  const [prompt, setPrompt] = useState("")
+  // There is no endpoint to point at — the transport talks to the chat agent
+  // directly, and both callbacks are server actions so the browser never holds
+  // an environment secret key. The chat id doubles as the game id the thread is
+  // persisted under.
   const transport = useTriggerChatTransport<typeof gameChat>({
     task: "game-chat",
     accessToken: ({ chatId }) => mintGameChatAccessToken(chatId),
     startSession: ({ chatId, clientData }) =>
       startGameChatSession({ chatId, clientData }),
-    sessions: initialSessions,
+    // What the last turn persisted: the session token and the stream cursor, so
+    // a fresh tab reconnects without a round-trip to create a session.
+    sessions: initialSession ? { [gameId]: initialSession } : undefined,
   })
-  const { messages, sendMessage, regenerate, status } = useChat({
+
+  const {
+    messages,
+    sendMessage,
+    stop: stopStream,
+    status,
+  } = useChat({
     id: gameId,
     messages: initialMessages,
     transport,
-    // Reconnect to a reply that was still streaming when the page loaded.
-    resume: initialSessions !== undefined,
+    // Only a game that has already had a turn has a stream to rejoin.
+    resume: Boolean(initialSession),
   })
 
-  // A new game arrives holding only the prompt it was created from, so ask for
-  // the reply here. The ref keeps Strict Mode's double mount from asking twice.
-  const requestedReply = useRef(false)
+  // A game is created with its opening prompt already stored as the thread's
+  // first message, so a new thread arrives with a user turn and no reply. Ask
+  // for that reply once per game: `sendMessage()` with no argument submits the
+  // messages already in the thread instead of appending another one.
+  const submittedGameId = useRef<string | null>(null)
 
   useEffect(() => {
-    if (requestedReply.current) {
+    if (submittedGameId.current === gameId) {
       return
     }
 
-    requestedReply.current = true
-
-    if (initialMessages.at(-1)?.role === "user") {
-      regenerate()
+    if (initialMessages.at(-1)?.role !== "user") {
+      return
     }
-  }, [initialMessages, regenerate])
 
-  function handleSubmit(text: string) {
-    sendMessage({ text })
-    setValue("")
+    // Strict Mode's simulated unmount runs `useChat`'s cleanup, `chat.stop()`,
+    // which would abort a send made synchronously here and leave the reply
+    // streaming to nobody. Deferring lets that cleanup cancel the timer
+    // instead, so only the mount that survives sends.
+    const timer = setTimeout(() => {
+      submittedGameId.current = gameId
+      sendMessage()
+    })
+
+    return () => clearTimeout(timer)
+  }, [gameId, initialMessages, sendMessage])
+
+  function handleSubmit(value: string) {
+    sendMessage({ text: value })
+    setPrompt("")
   }
+
+  // Two halves of one cancel: `stopGeneration` signals the run so the agent
+  // aborts its `streamText` (the run itself stays alive for the next message),
+  // and `stopStream` settles the local status back to ready. `useChat`'s stop
+  // alone never reaches the backend on a resumed stream, which is every stream
+  // this thread rejoins after a refresh.
+  const handleStop = useCallback(() => {
+    void transport.stopGeneration(gameId)
+    stopStream()
+  }, [transport, gameId, stopStream])
 
   return (
     <div className="flex h-svh flex-col">
@@ -81,7 +114,7 @@ export function ChatThread({
                 <MessageScrollerItem key={message.id} messageId={message.id}>
                   <Message align={message.role === "user" ? "end" : "start"}>
                     {message.role === "assistant" && (
-                      <MessageAvatar className="size-8 self-start rounded-lg bg-transparent">
+                      <MessageAvatar className="size-8 bg-transparent self-start rounded-lg">
                         <Image
                           src="/logo.svg"
                           alt="Sandbox"
@@ -93,16 +126,14 @@ export function ChatThread({
                     )}
                     <MessageContent>
                       <Bubble
-                        variant={
-                          message.role === "user" ? "secondary" : "ghost"
-                        }
+                        variant={message.role === "user" ? "secondary" : "ghost"}
                         align={message.role === "user" ? "end" : "start"}
                       >
                         <BubbleContent>
                           {message.parts.map((part, index) =>
                             part.type === "text" ? (
                               <span key={index}>{part.text}</span>
-                            ) : null
+                            ) : null,
                           )}
                         </BubbleContent>
                       </Bubble>
@@ -112,14 +143,18 @@ export function ChatThread({
               ))}
             </MessageScrollerContent>
           </MessageScrollerViewport>
+          <MessageScrollerButton />
         </MessageScroller>
       </MessageScrollerProvider>
       <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-4">
         <ChatComposer
-          value={value}
-          onValueChange={setValue}
+          value={prompt}
+          onValueChange={setPrompt}
           onSubmit={handleSubmit}
-          disabled={status === "submitted" || status === "streaming"}
+          onStop={handleStop}
+          streaming={status === "submitted" || status === "streaming"}
+          disabled={status !== "ready"}
+          placeholder="Ask for a change…"
         />
       </div>
     </div>
