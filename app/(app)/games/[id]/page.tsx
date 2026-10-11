@@ -1,7 +1,7 @@
 import { auth } from "@clerk/nextjs/server"
 import { notFound } from "next/navigation"
 
-import { ChatThread } from "@/components/chat-thread"
+import { GameChat } from "@/components/game-chat"
 import { mintGameChatAccessToken } from "@/lib/games/chat-actions"
 import { getGame } from "@/lib/games/queries"
 
@@ -26,7 +26,7 @@ export default async function GamePage(props: PageProps<"/games/[id]">) {
 
   // Keyed so switching games resets the thread instead of reusing its state
   return (
-    <ChatThread
+    <GameChat
       key={game.id}
       gameId={game.id}
       initialMessages={game.messages}
