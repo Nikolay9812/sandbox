@@ -9,7 +9,8 @@ import { db, games } from "@/lib/db/client"
 
 // Where the game's source lives inside the sandbox. `/home/daytona` is the
 // sandbox user's home, so this is the path a dev server would be pointed at.
-const GAME_DIR = "/home/daytona/game"
+// Exported for the agent's runtime instructions, which name it to the model.
+export const GAME_DIR = "/home/daytona/game"
 
 /**
  * Creates the Daytona sandbox a game is built in and records it on the game.

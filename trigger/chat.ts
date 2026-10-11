@@ -8,6 +8,7 @@ import {
   saveGameMessages,
   saveGameTurn,
 } from "@/lib/games/chat-store"
+import { gameInstructions } from "@/lib/games/instructions"
 
 /**
  * A game's chat thread, run as one long-lived task per conversation.
@@ -21,6 +22,11 @@ import {
  */
 export const gameChat = chat.agent({
   id: "game-chat",
+  // Set on the agent rather than in `run`, so `chat.toStreamTextOptions()`
+  // carries it into every turn. It never changes between turns, which makes it
+  // the prompt's most valuable cache breakpoint.
+  system: gameInstructions.join("\n\n"),
+  cacheControl: { type: "ephemeral" },
   hydrateMessages: async ({ chatId, trigger, incomingMessages }) => {
     const stored = await loadGameMessages(chatId)
 

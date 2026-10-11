@@ -5,11 +5,11 @@ import { CoinsIcon, MessageSquareIcon, SquarePenIcon } from "lucide-react"
 import Image from "next/image"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
-import { useState } from "react"
 
 import { Empty, EmptyDescription } from "@/components/ui/empty"
 import {
   Popover,
+  PopoverClose,
   PopoverContent,
   PopoverHeader,
   PopoverTitle,
@@ -29,14 +29,13 @@ import {
   SidebarMenuItem,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
-import type { GameListItem } from "@/lib/games/queries"
+import type { Game } from "@/lib/db/schema"
 
 export function AppSidebar({
   games,
   ...props
-}: React.ComponentProps<typeof Sidebar> & { games: GameListItem[] }) {
+}: React.ComponentProps<typeof Sidebar> & { games: Game[] }) {
   const pathname = usePathname()
-  const [recentsOpen, setRecentsOpen] = useState(false)
 
   return (
     <Sidebar collapsible="icon" {...props}>
@@ -95,20 +94,24 @@ export function AppSidebar({
             )}
             <SidebarMenu className="hidden group-data-[collapsible=icon]:flex">
               <SidebarMenuItem>
-                <Popover open={recentsOpen} onOpenChange={setRecentsOpen}>
+                <Popover>
                   <PopoverTrigger
                     render={
-                      <SidebarMenuButton
-                        isActive={pathname.startsWith("/games/")}
-                      />
+                      <SidebarMenuButton>
+                        <MessageSquareIcon />
+                        <span>Recents</span>
+                      </SidebarMenuButton>
                     }
+                  />
+                  <PopoverContent
+                    side="right"
+                    align="start"
+                    className="w-56 gap-1.5 p-1.5"
                   >
-                    <MessageSquareIcon />
-                    <span>Recents</span>
-                  </PopoverTrigger>
-                  <PopoverContent side="right" align="start" className="w-64">
-                    <PopoverHeader>
-                      <PopoverTitle>Recents</PopoverTitle>
+                    <PopoverHeader className="px-2 pt-1">
+                      <PopoverTitle className="text-xs text-muted-foreground">
+                        Recents
+                      </PopoverTitle>
                     </PopoverHeader>
                     {games.length === 0 ? (
                       <Empty className="border p-2">
@@ -117,20 +120,20 @@ export function AppSidebar({
                         </EmptyDescription>
                       </Empty>
                     ) : (
-                      <SidebarMenu className="max-h-80 overflow-y-auto">
+                      <SidebarMenu>
                         {games.map((game) => (
                           <SidebarMenuItem key={game.id}>
-                            <SidebarMenuButton
-                              isActive={pathname === `/games/${game.id}`}
+                            <PopoverClose
+                              nativeButton={false}
                               render={
-                                <Link
-                                  href={`/games/${game.id}`}
-                                  onClick={() => setRecentsOpen(false)}
-                                />
+                                <SidebarMenuButton
+                                  isActive={pathname === `/games/${game.id}`}
+                                  render={<Link href={`/games/${game.id}`} />}
+                                >
+                                  <span>{game.title}</span>
+                                </SidebarMenuButton>
                               }
-                            >
-                              <span>{game.title}</span>
-                            </SidebarMenuButton>
+                            />
                           </SidebarMenuItem>
                         ))}
                       </SidebarMenu>
