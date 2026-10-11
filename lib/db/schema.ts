@@ -22,15 +22,15 @@ export const games = pgTable(
       .$type<UIMessage[]>()
       .notNull()
       .default(sql`'[]'::jsonb`),
-    // Trigger.dev chat session cursors, written in the same statement as
-    // `messages`. `lastEventId` is where a reloaded page resumes the response
-    // stream; `lastInEventId` is where a continuation run resumes its input.
-    // Both are opaque and live as long as the session, so never cleared.
-    lastEventId: text("last_event_id"),
-    lastInEventId: text("last_in_event_id"),
-    // The chat runtime's opaque transcript state (compaction summary,
-    // injected context). Stored and handed back as-is.
-    transcriptState: jsonb("transcript_state"),
+    // Trigger.dev chat session state for the thread above, written by the
+    // agent's `onTurnComplete` in the same statement as the messages. The
+    // cursor is what a reloading browser resumes an interrupted turn from, so
+    // it must never be written ahead of the messages it points past.
+    chatAccessToken: text("chat_access_token"),
+    chatLastEventId: text("chat_last_event_id"),
+    // The Daytona sandbox the game is built in, created on the thread's first
+    // turn. Null until then, and for games created before sandboxes existed.
+    sandboxId: text("sandbox_id"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .default(sql`now()`),

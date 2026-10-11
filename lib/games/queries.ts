@@ -38,7 +38,7 @@ export async function getGame(id: string) {
       id: games.id,
       title: games.title,
       messages: games.messages,
-      lastEventId: games.lastEventId,
+      chatLastEventId: games.chatLastEventId,
     })
     .from(games)
     .where(and(eq(games.id, id), eq(games.orgId, orgId)))

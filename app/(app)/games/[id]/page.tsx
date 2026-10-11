@@ -17,10 +17,10 @@ export default async function GamePage(props: PageProps<"/games/[id]">) {
 
   // A stored cursor means the chat session exists, so hand the transport the
   // session to resume an in-flight reply from instead of starting a new one.
-  const initialSession = game.lastEventId
+  const initialSession = game.chatLastEventId
     ? {
         publicAccessToken: await mintGameChatAccessToken(game.id),
-        lastEventId: game.lastEventId,
+        lastEventId: game.chatLastEventId,
       }
     : undefined
 
