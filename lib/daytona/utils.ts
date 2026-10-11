@@ -9,7 +9,8 @@ import { db, games } from "@/lib/db/client"
 
 // Where the game's source lives inside the sandbox. `/home/daytona` is the
 // sandbox user's home, so this is the path a dev server would be pointed at.
-// Exported for the agent's runtime instructions, which name it to the model.
+// Exported because the agent is told this path in `@/lib/games/instructions` —
+// the prompt and the server have to be pointed at the same directory.
 export const GAME_DIR = "/home/daytona/game"
 
 /**
@@ -22,7 +23,9 @@ export const GAME_DIR = "/home/daytona/game"
  * a sandbox that exists and is seeded, and a crash in between leaks an unused
  * sandbox rather than pointing the game at a half-built one.
  */
-export async function createGameSandbox(gameId: string): Promise<string> {
+export async function createGameSandbox(
+  gameId: string
+): Promise<{ sandbox: Sandbox }> {
   const sandbox = await daytona.create({ labels: { gameId } })
 
   await sandbox.fs.createFolder(GAME_DIR, "755")
@@ -33,7 +36,45 @@ export async function createGameSandbox(gameId: string): Promise<string> {
     .set({ sandboxId: sandbox.id })
     .where(eq(games.id, gameId))
 
-  return sandbox.id
+  return { sandbox }
+}
+
+/**
+ * The game's sandbox, created if it has none and started if it was stopped.
+ *
+ * Every tool the agent calls needs a running sandbox and none of them should
+ * have to care why one might be missing, so this is the single entry point:
+ * a tool asks for the game's sandbox and either gets a usable one or an error.
+ *
+ * `onChatStart` already creates the sandbox before the first turn streams, so
+ * the create path here is a fallback — it covers games that predate sandboxes
+ * and a first turn whose creation crashed. Sandboxes also stop themselves once
+ * idle, which is the common case for a thread resumed after a while.
+ */
+export async function getGameSandbox(
+  gameId: string
+): Promise<{ sandbox: Sandbox }> {
+  const [game] = await db
+    .select({ sandboxId: games.sandboxId })
+    .from(games)
+    .where(eq(games.id, gameId))
+    .limit(1)
+
+  if (!game) {
+    throw new Error(`No game ${gameId} to get a sandbox for`)
+  }
+
+  if (!game.sandboxId) {
+    return createGameSandbox(gameId)
+  }
+
+  const sandbox = await daytona.get(game.sandboxId)
+
+  if (sandbox.state !== "started") {
+    await sandbox.start()
+  }
+
+  return { sandbox }
 }
 
 // The port the game's static server listens on inside the sandbox. Nothing
