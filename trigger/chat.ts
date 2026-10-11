@@ -1,6 +1,6 @@
 import { anthropic } from "@ai-sdk/anthropic"
 import { chat, upsertIncomingMessage } from "@trigger.dev/sdk/ai"
-import { streamText } from "ai"
+import { stepCountIs } from "ai"
 
 import { createGameSandbox } from "@/lib/daytona/utils"
 import {
@@ -9,6 +9,7 @@ import {
   saveGameTurn,
 } from "@/lib/games/chat-store"
 import { gameInstructions } from "@/lib/games/instructions"
+import { createGameTools } from "@/lib/games/tools"
 
 /**
  * A game's chat thread, run as one long-lived task per conversation.
@@ -27,6 +28,10 @@ export const gameChat = chat.agent({
   // the prompt's most valuable cache breakpoint.
   system: gameInstructions.join("\n\n"),
   cacheControl: { type: "ephemeral" },
+  // Resolved per turn because each tool is bound to its game's sandbox, and the
+  // chat id is the game id. Declared here as well as passed to `streamText` so
+  // the SDK re-converts earlier turns' tool calls against the same set.
+  tools: ({ chatId }) => createGameTools(chatId),
   hydrateMessages: async ({ chatId, trigger, incomingMessages }) => {
     const stored = await loadGameMessages(chatId)
 
@@ -57,14 +62,19 @@ export const gameChat = chat.agent({
       chatLastEventId: lastEventId,
     })
   },
-  run: async ({ messages, signal }) =>
+  // The run argument's `streamText`, not the one from `ai`: it carries the
+  // system prompt and the `prepareStep` behind compaction, steering and
+  // background injection — and merges `tools` with the managed ones, where
+  // spreading `chat.toStreamTextOptions()` and then setting `tools` replaces
+  // them.
+  run: async ({ messages, tools, signal, streamText }) =>
     streamText({
-      // Spread first, so every option below still wins. Wires up the
-      // `prepareStep` behind compaction, steering and background injection —
-      // all of which silently no-op without it.
-      ...chat.toStreamTextOptions(),
       model: anthropic("claude-sonnet-5"),
       messages,
+      tools,
+      // A build is many tool calls — list, read, a write per file, fixes — and
+      // the default stops after the first step.
+      stopWhen: stepCountIs(50),
       // Fires on stop and on cancel. Without it, Stop only updates the UI.
       abortSignal: signal,
     }),
