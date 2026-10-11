@@ -3,48 +3,48 @@ import "server-only"
 import { auth } from "@clerk/nextjs/server"
 import { and, desc, eq } from "drizzle-orm"
 
-import { db } from "@/lib/db"
-import { games } from "@/lib/db/schema"
+import { db, games, type Game } from "@/lib/db"
 
-export async function listGames() {
+/**
+ * Games belonging to the caller's active organization, newest first.
+ */
+export async function listGames(): Promise<Game[]> {
   const { orgId } = await auth()
 
+  // Every game is owned by an org, so without an active one there is nothing
+  // this caller is allowed to see.
   if (!orgId) {
     return []
   }
 
   return db
-    .select({ id: games.id, title: games.title })
+    .select()
     .from(games)
     .where(eq(games.orgId, orgId))
     .orderBy(desc(games.createdAt))
 }
 
-export type GameListItem = Awaited<ReturnType<typeof listGames>>[number]
-
+// Postgres rejects a malformed uuid with an error rather than an empty result,
+// so bad ids from the URL are filtered out before they reach the query.
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-export async function getGame(id: string) {
+/**
+ * A single game, or `undefined` when it doesn't exist or belongs to another
+ * organization.
+ */
+export async function getGame(id: string): Promise<Game | undefined> {
   const { orgId } = await auth()
 
-  // Non-UUID ids would make Postgres throw on the uuid cast
   if (!orgId || !UUID_RE.test(id)) {
-    return null
+    return undefined
   }
 
   const [game] = await db
-    .select({
-      id: games.id,
-      title: games.title,
-      messages: games.messages,
-      chatLastEventId: games.chatLastEventId,
-    })
+    .select()
     .from(games)
     .where(and(eq(games.id, id), eq(games.orgId, orgId)))
     .limit(1)
 
-  return game ?? null
+  return game
 }
-
-export type Game = NonNullable<Awaited<ReturnType<typeof getGame>>>
