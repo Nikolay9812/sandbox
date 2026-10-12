@@ -1,7 +1,7 @@
 "use server"
 
-import { auth as clerkAuth } from "@clerk/nextjs/server"
-import { auth } from "@trigger.dev/sdk"
+import { auth } from "@clerk/nextjs/server"
+import { auth as triggerAuth } from "@trigger.dev/sdk"
 import { chat, type ChatStartSessionParams } from "@trigger.dev/sdk/ai"
 
 import { getGame } from "@/lib/games/queries"
@@ -10,37 +10,46 @@ import type { gameChat } from "@/trigger/chat"
 const startSession = chat.createStartSessionAction<typeof gameChat>("game-chat")
 
 /**
- * Both actions take a chat id straight from the browser, so each one checks
- * the caller may use it. `getGame` is also the authorization check — it only
- * resolves games belonging to the caller's active organization.
+ * The check the chat route handler used to run per request. It moves here
+ * because these two actions are the only paths that hand the browser a token
+ * for a chat session — being signed in is not the same as being entitled to
+ * this game's thread, and the id arrives from the browser.
  */
-async function requireGame(chatId: string) {
-  const { userId, orgId } = await clerkAuth()
+async function authorizeGame(gameId: string) {
+  const { userId, orgId } = await auth()
 
   if (!userId || !orgId) {
     throw new Error("Unauthorized")
   }
 
-  if (!(await getGame(chatId))) {
+  // Also the ownership check — `getGame` only resolves games belonging to the
+  // caller's active organization.
+  if (!(await getGame(gameId))) {
     throw new Error("Not Found")
   }
 }
 
-// Creates the chat session and its first run, and returns a session-scoped
-// token. Idempotent on the chat id.
+/**
+ * Creates the chat session and triggers its first run, then returns a
+ * session-scoped token. Idempotent on (environment, chatId), so two tabs
+ * converge on one session.
+ */
 export async function startGameChatSession(
   params: ChatStartSessionParams<typeof gameChat>
 ) {
-  await requireGame(params.chatId)
+  await authorizeGame(params.chatId)
 
   return startSession(params)
 }
 
-// The transport calls this to refresh an expired session token.
+/**
+ * Pure mint — the transport calls this on a 401/403 to refresh an expired
+ * token. Runs on the server, so `TRIGGER_SECRET_KEY` never reaches the browser.
+ */
 export async function mintGameChatAccessToken(chatId: string) {
-  await requireGame(chatId)
+  await authorizeGame(chatId)
 
-  return auth.createPublicToken({
+  return triggerAuth.createPublicToken({
     scopes: {
       read: { sessions: chatId },
       write: { sessions: chatId },

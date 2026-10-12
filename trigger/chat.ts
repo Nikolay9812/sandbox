@@ -1,6 +1,6 @@
 import { anthropic } from "@ai-sdk/anthropic"
 import { chat, upsertIncomingMessage } from "@trigger.dev/sdk/ai"
-import { stepCountIs } from "ai"
+import { stepCountIs, streamText } from "ai"
 
 import { createGameSandbox } from "@/lib/daytona/utils"
 import {
@@ -23,15 +23,6 @@ import { createGameTools } from "@/lib/games/tools"
  */
 export const gameChat = chat.agent({
   id: "game-chat",
-  // Set on the agent rather than in `run`, so `chat.toStreamTextOptions()`
-  // carries it into every turn. It never changes between turns, which makes it
-  // the prompt's most valuable cache breakpoint.
-  system: gameInstructions.join("\n\n"),
-  cacheControl: { type: "ephemeral" },
-  // Resolved per turn because each tool is bound to its game's sandbox, and the
-  // chat id is the game id. Declared here as well as passed to `streamText` so
-  // the SDK re-converts earlier turns' tool calls against the same set.
-  tools: ({ chatId }) => createGameTools(chatId),
   hydrateMessages: async ({ chatId, trigger, incomingMessages }) => {
     const stored = await loadGameMessages(chatId)
 
@@ -62,20 +53,30 @@ export const gameChat = chat.agent({
       chatLastEventId: lastEventId,
     })
   },
-  // The run argument's `streamText`, not the one from `ai`: it carries the
-  // system prompt and the `prepareStep` behind compaction, steering and
-  // background injection — and merges `tools` with the managed ones, where
-  // spreading `chat.toStreamTextOptions()` and then setting `tools` replaces
-  // them.
-  run: async ({ messages, tools, signal, streamText }) =>
+  // Resolved per turn rather than declared once, because the tools have to
+  // write into this game's sandbox: the chat id is the game id, so each turn's
+  // set is closed over the right one and the model never names a game itself.
+  // Declared on the config and handed back to `streamText` below, rather than
+  // only passed there: history re-converted at the top of a later turn needs
+  // the same set to make sense of the tool calls already in it.
+  tools: ({ chatId }) => createGameTools(chatId),
+  run: async ({ messages, tools, signal }) =>
     streamText({
-      model: anthropic("claude-sonnet-5"),
+      // Spread first, so every option below still wins. Wires up the
+      // `prepareStep` behind compaction, steering and background injection —
+      // all of which silently no-op without it.
+      ...chat.toStreamTextOptions({ tools }),
+      model: anthropic("claude-opus-5"),
+      // `instructions`, not the deprecated `system`. Passed here rather than
+      // through `chat.prompt.set()` because the prompt is static — there is no
+      // per-chat or dashboard-versioned part of it to resolve in a hook.
+      instructions: gameInstructions,
       messages,
-      tools,
-      // A build is many tool calls — list, read, a write per file, fixes — and
-      // the default stops after the first step.
-      stopWhen: stepCountIs(50),
       // Fires on stop and on cancel. Without it, Stop only updates the UI.
       abortSignal: signal,
+      // A turn is a read-edit-read loop over the game's files, so it needs
+      // room for many steps; the default of one would stop the turn dead
+      // after the first tool call, before the model has said anything.
+      stopWhen: stepCountIs(48),
     }),
 })

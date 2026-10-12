@@ -1,38 +1,84 @@
 import { GAME_DIR, PREVIEW_PORT } from "@/lib/daytona/utils"
 
 /**
- * The environment a game lives in: the Daytona sandbox each game is given,
- * where its files go, and how the preview serves them.
+ * The sandbox the game is built in and served from.
  *
- * The paths and port come from `@/lib/daytona/utils`, which creates and serves
- * the sandbox, so this can't drift from what is actually running.
+ * The directory and port are the ones `@/lib/daytona/utils` actually creates
+ * and serves, interpolated rather than restated, so the agent can't be told
+ * about a layout the sandbox doesn't have.
  */
-export const runtime = `# Runtime environment
+export const runtime = `# Where the game lives
 
-Each game has its own isolated Linux sandbox. Nothing in it is shared with other games.
+Each game has its own Linux sandbox, and it is the same sandbox for the whole
+conversation — what you wrote on an earlier turn is still on disk.
 
-## The game directory
+The game's source lives in ${GAME_DIR}. That directory is the game: nothing
+outside it is served, and nothing that isn't a file in it survives the turn.
 
-- The game lives in \`${GAME_DIR}\`. Every file the game needs goes inside it; nothing outside it is served.
-- \`${GAME_DIR}/index.html\` is the entry point the preview loads. A new game starts with a placeholder \`index.html\` — replace it on the first build.
-- Reference files with relative paths (\`./game.js\`, \`assets/player.png\`), never absolute ones.
+${GAME_DIR}/index.html is the entry point — it is what loads at "/", so it has
+to exist and has to be the playable game.
 
-## How the game is served
+# What is already there
 
-- The directory is served as plain static files by \`python3 -m http.server\` on port ${PREVIEW_PORT}. There is no build step, bundler or dev server: the browser receives exactly the files on disk.
-- So write code that runs in a browser as-is: HTML, CSS and JavaScript. No TypeScript, JSX or anything that needs compiling, and no bare \`import "pkg"\` specifiers.
-- Split JavaScript across files with \`<script type="module">\` and relative imports.
-- Libraries load from a CDN with a pinned version, e.g. \`https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js\`, or through an import map in \`index.html\`. The player's browser has internet access, so CDN assets work.
-- Do not start, stop or reconfigure the server — it is managed for you and only needs the files to be in place.
+A new sandbox is not empty. It starts with:
 
-## The preview
+- index.html — the page, carrying the import map described below.
+- style.css — a full-bleed canvas, no scrolling, no tap highlights.
+- welcome.js — the holding screen. Delete it and its <script> tag on the first
+  turn; it is a placeholder, not part of any game.
+- engine/ — a 3D game toolkit, described in its own section. Read that before
+  building anything, and do not rewrite these files.
 
-- The user plays the game in an iframe beside the chat, and reloads it to see your changes.
-- Size the game to fill the iframe and handle resizes; don't assume a fixed window size.
-- Keyboard input only reaches the iframe once it has focus, so show a "click to start" screen or otherwise prompt a click before play begins.
-- Don't use \`alert\`, \`confirm\` or \`prompt\` — draw all UI inside the page.
-- Persist anything that should survive a reload (high scores, settings) in \`localStorage\`.
+# How it reaches the player
 
-## Sandbox lifecycle
+A static file server is already running on port ${PREVIEW_PORT} against that
+directory, and the preview panel loads it in an iframe. You never start,
+restart or configure a server; one is running before your first turn, and a
+second one on that port would only fail to bind.
 
-- The sandbox stops itself when idle and is restarted the next time the preview loads. Files in \`${GAME_DIR}\` survive this; running processes and anything in \`/tmp\` do not.`
+Files are served exactly as they are written, straight from disk, per request.
+There is no build step, no bundler, no transpiler and no package install, and
+nothing to restart after an edit — a saved file is live on the next reload.
+
+That means the browser has to understand what you write:
+
+- HTML, CSS and JavaScript that runs as-is. No TypeScript, no JSX, no SCSS.
+- Your own modules load by relative path: "./player.js", "./engine/index.js".
+- Everything runs in the player's browser. The game has no backend, no
+  database and no server-side code; persistence is localStorage.
+
+# three.js, and the import map
+
+index.html declares an import map, so these two specifiers resolve in the
+browser with no bundler:
+
+- "three" — the library itself.
+- "three/addons/..." — everything under examples/jsm: OrbitControls,
+  GLTFLoader, EffectComposer, RoundedBoxGeometry and the rest.
+
+  import * as THREE from "three"
+  import { OrbitControls } from "three/addons/controls/OrbitControls.js"
+
+The map only applies to the document that declares it, so it has to stay in
+index.html, above the first module script. If you rewrite index.html, carry it
+across — without it every import of "three" fails and the screen stays blank,
+including every file under engine/.
+
+Any other library has to come from a CDN by full url, loaded by the page.
+
+# Assets
+
+Beyond three.js there is no art and no audio in the sandbox, so a path to an
+image you didn't create is a broken image. Build models out of geometry
+(engine/models.js has a shelf of them), draw textures to a canvas
+(engine/materials.js), and synthesise sound (engine/sound.js). Reach for a CDN
+url only when you are certain of it.
+
+# Layout
+
+Keep a small game in index.html and one module beside it. As it grows, split it
+into more modules next to it (./game.js, ./player.js, ./enemies.js) rather than
+letting one file sprawl — you will be reading this code back on every later
+turn. Leave engine/ alone and import from it; it is shared ground, and a game
+that edits it is a game whose next turn starts by re-reading a toolkit that no
+longer matches what you know about it.`
