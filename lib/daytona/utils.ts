@@ -1,3 +1,7 @@
+import type { Dirent } from "node:fs"
+import { readdir } from "node:fs/promises"
+import path from "node:path"
+
 import type { Sandbox } from "@daytona/sdk"
 import { eq } from "drizzle-orm"
 
@@ -13,11 +17,18 @@ import { db, games } from "@/lib/db/client"
 // the prompt and the server have to be pointed at the same directory.
 export const GAME_DIR = "/home/daytona/game"
 
+// The files every new sandbox is seeded with, copied into `GAME_DIR` as-is.
+// Nothing imports them, so `trigger.config.ts` ships the folder to the worker
+// explicitly, and resolving from `process.cwd()` finds it both there and in
+// local dev, where the cwd is the project root.
+const RUNTIME_DIR = path.join(process.cwd(), "lib/games/runtime")
+
 /**
  * Creates the Daytona sandbox a game is built in and records it on the game.
  *
- * The sandbox starts with a placeholder `index.html` so the game has something
- * servable from its very first moment, before the agent has written any code.
+ * The sandbox is seeded with everything in `lib/games/runtime` — at least a
+ * placeholder `index.html`, so the game has something servable from its very
+ * first moment, before the agent has written any code.
  *
  * The sandbox id is saved last: a row with a `sandboxId` therefore always names
  * a sandbox that exists and is seeded, and a crash in between leaks an unused
@@ -28,8 +39,7 @@ export async function createGameSandbox(
 ): Promise<{ sandbox: Sandbox }> {
   const sandbox = await daytona.create({ labels: { gameId } })
 
-  await sandbox.fs.createFolder(GAME_DIR, "755")
-  await sandbox.fs.uploadFile(Buffer.from("New game"), `${GAME_DIR}/index.html`)
+  await seedRuntime(sandbox)
 
   await db
     .update(games)
@@ -37,6 +47,49 @@ export async function createGameSandbox(
     .where(eq(games.id, gameId))
 
   return { sandbox }
+}
+
+/**
+ * Mirrors `lib/games/runtime` into the sandbox's `GAME_DIR`, folders included.
+ *
+ * Folders are created first, parents before children — sorting puts every
+ * path after its parent, its prefix — so empty ones survive too and no upload
+ * relies on its destination's parent already existing. Files then go up in a
+ * single batch rather than a request each.
+ */
+async function seedRuntime(sandbox: Sandbox): Promise<void> {
+  const entries = await readdir(RUNTIME_DIR, {
+    recursive: true,
+    withFileTypes: true,
+  })
+
+  // `readdir` hands back native paths; the sandbox wants posix ones, which on
+  // Windows (local dev) means swapping the separators.
+  const toSandboxPath = (entry: Dirent) =>
+    path.posix.join(
+      GAME_DIR,
+      ...path
+        .relative(RUNTIME_DIR, path.join(entry.parentPath, entry.name))
+        .split(path.sep)
+    )
+
+  const folders = entries
+    .filter((entry) => entry.isDirectory())
+    .map(toSandboxPath)
+    .sort()
+
+  for (const folder of [GAME_DIR, ...folders]) {
+    await sandbox.fs.createFolder(folder, "755")
+  }
+
+  await sandbox.fs.uploadFiles(
+    entries
+      .filter((entry) => entry.isFile())
+      .map((entry) => ({
+        source: path.join(entry.parentPath, entry.name),
+        destination: toSandboxPath(entry),
+      }))
+  )
 }
 
 /**

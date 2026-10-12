@@ -1,3 +1,4 @@
+import { additionalFiles } from "@trigger.dev/build/extensions/core";
 import { defineConfig } from "@trigger.dev/sdk";
 
 export default defineConfig({
@@ -19,4 +20,11 @@ export default defineConfig({
     },
   },
   dirs: ["./trigger"],
+  build: {
+    extensions: [
+      // Seeded into every new game sandbox by reading them off disk, so the
+      // bundler never sees them. The glob skips dotfiles and empty folders.
+      additionalFiles({ files: ["./lib/games/runtime/**"] }),
+    ],
+  },
 });
