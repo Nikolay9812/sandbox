@@ -1,6 +1,7 @@
 "use server"
 
 import { auth } from "@clerk/nextjs/server"
+import * as Sentry from "@sentry/nextjs"
 import { auth as triggerAuth } from "@trigger.dev/sdk"
 import { chat, type ChatStartSessionParams } from "@trigger.dev/sdk/ai"
 
@@ -18,13 +19,27 @@ const startSession = chat.createStartSessionAction<typeof gameChat>("game-chat")
 async function authorizeGame(gameId: string) {
   const { userId, orgId } = await auth()
 
+  // Denials are logged as well as thrown: the throw reads as one more failed
+  // action, while the log says which check refused whom, for which game.
   if (!userId || !orgId) {
+    Sentry.logger.warn("Game chat access denied", {
+      "game.id": gameId,
+      "game.chat.denial": "unauthenticated",
+    })
+
     throw new Error("Unauthorized")
   }
 
   // Also the ownership check — `getGame` only resolves games belonging to the
   // caller's active organization.
   if (!(await getGame(gameId))) {
+    Sentry.logger.warn("Game chat access denied", {
+      "game.id": gameId,
+      "game.chat.denial": "not_found",
+      "user.id": userId,
+      "org.id": orgId,
+    })
+
     throw new Error("Not Found")
   }
 }
@@ -39,7 +54,11 @@ export async function startGameChatSession(
 ) {
   await authorizeGame(params.chatId)
 
-  return startSession(params)
+  const session = await startSession(params)
+
+  Sentry.logger.info("Game chat session started", { "game.id": params.chatId })
+
+  return session
 }
 
 /**

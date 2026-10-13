@@ -2,6 +2,7 @@
 
 import { anthropic } from "@ai-sdk/anthropic"
 import { auth } from "@clerk/nextjs/server"
+import * as Sentry from "@sentry/nextjs"
 import { generateText } from "ai"
 import { refresh } from "next/cache"
 import { redirect } from "next/navigation"
@@ -41,7 +42,13 @@ async function generateTitle(prompt: string) {
     const title = text.trim().replace(/^["'“”]+|["'“”]+$/g, "")
 
     return title || truncate(prompt)
-  } catch {
+  } catch (error) {
+    // Swallowed on purpose, which makes this the only sign that every new
+    // game is being named after its raw prompt.
+    Sentry.logger.warn("Game title generation failed, using the prompt", {
+      "error.type": error instanceof Error ? error.name : typeof error,
+    })
+
     return truncate(prompt)
   }
 }
@@ -84,6 +91,12 @@ export async function createGame(prompt: string) {
       ],
     })
     .returning({ id: games.id })
+
+  Sentry.logger.info("Game created", {
+    "game.id": game.id,
+    "org.id": orgId,
+    "game.prompt.length": trimmedPrompt.length,
+  })
 
   // The redirect below stays inside `app/(app)/layout.tsx`, so invalidate the
   // router cache rather than let the sidebar render the games list it already

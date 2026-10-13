@@ -3,6 +3,10 @@ import { readdir } from "node:fs/promises"
 import path from "node:path"
 
 import type { Sandbox } from "@daytona/sdk"
+// `@sentry/node` rather than `@sentry/nextjs`: this module runs in both the
+// Trigger.dev worker and the Next.js server, and both clients register on the
+// same global carrier, so the logs land on whichever one is initialized.
+import * as Sentry from "@sentry/node"
 import { eq } from "drizzle-orm"
 
 import { daytona } from "@/lib/daytona/client"
@@ -37,14 +41,22 @@ const RUNTIME_DIR = path.join(process.cwd(), "lib/games/runtime")
 export async function createGameSandbox(
   gameId: string
 ): Promise<{ sandbox: Sandbox }> {
+  const startedAt = performance.now()
   const sandbox = await daytona.create({ labels: { gameId } })
 
-  await seedRuntime(sandbox)
+  const seededFiles = await seedRuntime(sandbox)
 
   await db
     .update(games)
     .set({ sandboxId: sandbox.id })
     .where(eq(games.id, gameId))
+
+  Sentry.logger.info("Game sandbox created", {
+    "game.id": gameId,
+    "game.sandbox.id": sandbox.id,
+    "game.sandbox.seeded_files": seededFiles,
+    duration_ms: Math.round(performance.now() - startedAt),
+  })
 
   return { sandbox }
 }
@@ -57,7 +69,7 @@ export async function createGameSandbox(
  * relies on its destination's parent already existing. Files then go up in a
  * single batch rather than a request each.
  */
-async function seedRuntime(sandbox: Sandbox): Promise<void> {
+async function seedRuntime(sandbox: Sandbox): Promise<number> {
   const entries = await readdir(RUNTIME_DIR, {
     recursive: true,
     withFileTypes: true,
@@ -82,14 +94,16 @@ async function seedRuntime(sandbox: Sandbox): Promise<void> {
     await sandbox.fs.createFolder(folder, "755")
   }
 
-  await sandbox.fs.uploadFiles(
-    entries
-      .filter((entry) => entry.isFile())
-      .map((entry) => ({
-        source: path.join(entry.parentPath, entry.name),
-        destination: toSandboxPath(entry),
-      }))
-  )
+  const files = entries
+    .filter((entry) => entry.isFile())
+    .map((entry) => ({
+      source: path.join(entry.parentPath, entry.name),
+      destination: toSandboxPath(entry),
+    }))
+
+  await sandbox.fs.uploadFiles(files)
+
+  return files.length
 }
 
 /**
@@ -118,14 +132,18 @@ export async function getGameSandbox(
   }
 
   if (!game.sandboxId) {
+    // The fallback path. For a game created after sandboxes existed, it firing
+    // means the create in `onChatStart` failed.
+    Sentry.logger.warn("Game has no sandbox, creating one on demand", {
+      "game.id": gameId,
+    })
+
     return createGameSandbox(gameId)
   }
 
   const sandbox = await daytona.get(game.sandboxId)
 
-  if (sandbox.state !== "started") {
-    await sandbox.start()
-  }
+  await ensureStarted(sandbox)
 
   return { sandbox }
 }
@@ -163,11 +181,11 @@ export async function startGameServer(
   const sandbox = await daytona.get(sandboxId)
 
   // Sandboxes stop themselves once idle, and a stopped one serves nothing.
-  if (sandbox.state !== "started") {
-    await sandbox.start()
-  }
+  await ensureStarted(sandbox)
 
   if (!(await serverResponds(sandbox))) {
+    const startedAt = performance.now()
+
     // `nohup … &` hands the server off to init and closes the pipes the exec
     // is waiting on, so this returns instead of blocking for the server's
     // lifetime. The log is where to look when a preview comes back empty.
@@ -184,9 +202,37 @@ export async function startGameServer(
         `Game server failed to start in sandbox ${sandboxId}: ${log.result.trim() || "no output"}`
       )
     }
+
+    Sentry.logger.info("Game server started", {
+      "game.sandbox.id": sandboxId,
+      duration_ms: Math.round(performance.now() - startedAt),
+    })
   }
 
   return { sandbox }
+}
+
+/**
+ * Starts a sandbox that has stopped itself, and leaves a running one alone.
+ *
+ * A start is the slow half of a cold preview or a resumed thread, so it is
+ * logged with how long it took and the state it was woken from.
+ */
+async function ensureStarted(sandbox: Sandbox): Promise<void> {
+  if (sandbox.state === "started") {
+    return
+  }
+
+  const previousState = String(sandbox.state)
+  const startedAt = performance.now()
+
+  await sandbox.start()
+
+  Sentry.logger.info("Game sandbox started", {
+    "game.sandbox.id": sandbox.id,
+    "game.sandbox.previous_state": previousState,
+    duration_ms: Math.round(performance.now() - startedAt),
+  })
 }
 
 /**

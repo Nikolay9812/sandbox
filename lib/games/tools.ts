@@ -1,6 +1,7 @@
 import path from "node:path"
 
 import type { FileInfo, Sandbox } from "@daytona/sdk"
+import * as Sentry from "@sentry/node"
 import { tool } from "ai"
 import { z } from "zod"
 
@@ -135,7 +136,7 @@ export function createGameTools(gameId: string) {
           ),
       }),
       execute: ({ path: filePath }) =>
-        expected(async () => {
+        expected("read_file", async () => {
           const target = resolveGamePath(filePath)
           const box = await sandbox()
           const info = await statFile(box, target)
@@ -172,7 +173,7 @@ export function createGameTools(gameId: string) {
           .describe("The complete contents of the file, not a fragment."),
       }),
       execute: ({ path: filePath, content }) =>
-        expected(async () => {
+        expected("write_file", async () => {
           const target = resolveGamePath(filePath)
 
           if (Buffer.byteLength(content, "utf8") > MAX_FILE_BYTES) {
@@ -220,7 +221,7 @@ export function createGameTools(gameId: string) {
           ),
       }),
       execute: ({ path: filePath, find, replace, replace_all: replaceAll }) =>
-        expected(async () => {
+        expected("replace_text", async () => {
           const target = resolveGamePath(filePath)
 
           if (find === "") {
@@ -275,7 +276,7 @@ export function createGameTools(gameId: string) {
           ),
       }),
       execute: ({ path: filePath }) =>
-        expected(async () => {
+        expected("list_files", async () => {
           const target = resolveGamePath(filePath ?? ".", { allowRoot: true })
           const box = await sandbox()
 
@@ -317,7 +318,7 @@ export function createGameTools(gameId: string) {
           ),
       }),
       execute: ({ path: filePath }) =>
-        expected(async () => {
+        expected("delete_file", async () => {
           const target = resolveGamePath(filePath)
           const box = await sandbox()
           const info = await statFile(box, target)
@@ -352,11 +353,21 @@ export type GameTools = ReturnType<typeof createGameTools>
  */
 class ToolInputError extends Error {}
 
-async function expected(run: () => Promise<string>): Promise<string> {
+async function expected(
+  toolName: string,
+  run: () => Promise<string>
+): Promise<string> {
   try {
     return await run()
   } catch (error) {
     if (error instanceof ToolInputError) {
+      // Every one of these is a path `resolveGamePath` refused, so a run of
+      // them is the model fighting the confinement rather than a game bug.
+      Sentry.logger.warn("Game tool path rejected", {
+        "gen_ai.tool.name": toolName,
+        "game.tool.rejection": error.message,
+      })
+
       return error.message
     }
 

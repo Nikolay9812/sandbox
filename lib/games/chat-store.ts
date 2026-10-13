@@ -1,3 +1,4 @@
+import * as Sentry from "@sentry/node"
 import type { TranscriptStorage } from "@trigger.dev/sdk/ai"
 import type { UIMessage } from "ai"
 import { eq } from "drizzle-orm"
@@ -35,7 +36,15 @@ export const gameTranscriptStorage: TranscriptStorage = {
       .where(eq(games.id, chatId))
       .limit(1)
 
-    if (!game) return { messages: [], state: null }
+    // Only an authorized session can name a chat, so a missing row means the
+    // game was deleted under a live session — and the agent starts it blank.
+    if (!game) {
+      Sentry.logger.warn("Game transcript not found, starting empty", {
+        "game.id": chatId,
+      })
+
+      return { messages: [], state: null }
+    }
 
     const cursors = {
       lastOutEventId: game.lastOutEventId ?? undefined,

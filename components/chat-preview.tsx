@@ -114,6 +114,15 @@ export function ChatPreview({
         const message =
           error instanceof Error ? error.message : "Preview is unavailable"
 
+        // The panel shows this to the player and nothing else hears of it — a
+        // server error is captured on the server, but a 404/409 or a network
+        // failure on the way there only ever shows up here.
+        Sentry.logger.warn("Game preview failed to load", {
+          "game.id": gameId,
+          "game.revision": revision,
+          "exception.message": message,
+        })
+
         // A reload that fails leaves the game already on screen where it is.
         // It is the previous turn's build rather than the latest one, but the
         // panel has no retry of its own — trading a working preview for an
