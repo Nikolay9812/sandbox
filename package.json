@@ -25,6 +25,7 @@
     "@neon/config": "^1.8.4",
     "@neon/env": "^1.5.1",
     "@sentry/nextjs": "^11.7.0",
+    "@sentry/node": "^11.7.0",
     "@shadcn/react": "^0.3.0",
     "@trigger.dev/sdk": "4.7.3",
     "@vercel/functions": "^3.9.11",
@@ -52,6 +53,7 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@sentry/esbuild-plugin": "^5.4.1",
     "@tailwindcss/postcss": "^4",
     "@trigger.dev/build": "4.7.3",
     "@types/node": "^20",

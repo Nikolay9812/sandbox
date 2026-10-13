@@ -22,12 +22,23 @@ export const games = pgTable(
       .$type<UIMessage[]>()
       .notNull()
       .default(sql`'[]'::jsonb`),
-    // Trigger.dev chat session state for the thread above, written by the
-    // agent's `onTurnComplete` in the same statement as the messages. The
-    // cursor is what a reloading browser resumes an interrupted turn from, so
-    // it must never be written ahead of the messages it points past.
+    // Trigger.dev chat session state for the thread above. The token is
+    // refreshed by the agent's `onTurnStart`; everything else is written by its
+    // transcript storage in the same statement as the messages. The out cursor
+    // is what a reloading browser resumes an interrupted turn from, so it must
+    // never be written ahead of the messages it points past.
     chatAccessToken: text("chat_access_token"),
     chatLastEventId: text("chat_last_event_id"),
+    chatLastInEventId: text("chat_last_in_event_id"),
+    // The runtime's opaque record (compaction summary, injected context),
+    // stored as-is and handed back when a run continues the chat.
+    chatState: jsonb("chat_state"),
+    // Ids in `messages` that are partial answers from a stopped or failed
+    // turn, so they stay marked partial across a continuation.
+    chatNonFinalIds: text("chat_non_final_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::text[]`),
     // The Daytona sandbox the game is built in, created on the thread's first
     // turn. Null until then, and for games created before sandboxes existed.
     sandboxId: text("sandbox_id"),

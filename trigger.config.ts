@@ -1,3 +1,5 @@
+import { sentryEsbuildPlugin } from "@sentry/esbuild-plugin";
+import { esbuildPlugin } from "@trigger.dev/build/extensions";
 import { additionalFiles } from "@trigger.dev/build/extensions/core";
 import { defineConfig } from "@trigger.dev/sdk";
 
@@ -25,6 +27,16 @@ export default defineConfig({
       // Seeded into every new game sandbox by reading them off disk, so the
       // bundler never sees them. The glob skips dotfiles and empty folders.
       additionalFiles({ files: ["./lib/games/runtime/**"] }),
+      // Uploads source maps to Sentry on deploy so task stack traces are readable.
+      esbuildPlugin(
+        sentryEsbuildPlugin({
+          org: "codewithantonio-hg",
+          project: "sandbox",
+          authToken: process.env.SENTRY_AUTH_TOKEN,
+          telemetry: false,
+        }),
+        { placement: "last", target: "deploy" },
+      ),
     ],
   },
 });

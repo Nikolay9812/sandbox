@@ -1,12 +1,11 @@
 import { anthropic } from "@ai-sdk/anthropic"
-import { chat, upsertIncomingMessage } from "@trigger.dev/sdk/ai"
+import { chat } from "@trigger.dev/sdk/ai"
 import { stepCountIs, streamText } from "ai"
 
 import { createGameSandbox } from "@/lib/daytona/utils"
 import {
-  loadGameMessages,
-  saveGameMessages,
-  saveGameTurn,
+  gameTranscriptStorage,
+  saveGameChatToken,
 } from "@/lib/games/chat-store"
 import { gameInstructions } from "@/lib/games/instructions"
 import { createGameTools } from "@/lib/games/tools"
@@ -15,43 +14,28 @@ import { createGameTools } from "@/lib/games/tools"
  * A game's chat thread, run as one long-lived task per conversation.
  *
  * A game owns exactly one thread and the chat id is the game id, so the
- * `games` row stays the source of truth for history: `hydrateMessages` reads it
- * back at the top of every turn instead of trusting the copy the browser holds.
+ * transcript lives on the `games` row: the runtime writes every change to it
+ * through `storage`, and reads it back when a later run continues the chat.
  *
  * Authorization happens before a session can exist, in the server actions in
  * `@/lib/games/chat-actions` — there is no Clerk session in here to scope by.
  */
 export const gameChat = chat.agent({
   id: "game-chat",
-  hydrateMessages: async ({ chatId, trigger, incomingMessages }) => {
-    const stored = await loadGameMessages(chatId)
-
-    // Appends a genuinely new user message and no-ops otherwise. A new game is
-    // created with its opening prompt already stored, and the client replays
-    // that same message to ask for the first reply — this dedupes it by id.
-    if (upsertIncomingMessage(stored, { trigger, incomingMessages })) {
-      await saveGameMessages({ gameId: chatId, messages: stored })
-    }
-
-    return stored
-  },
+  // A new game is created with its opening prompt already stored, and the
+  // client replays that same message to ask for the first reply. The runtime
+  // keys its transcript by message id and each save rewrites the whole thread,
+  // so the replay replaces the stored prompt rather than doubling it.
+  storage: gameTranscriptStorage,
   // Fires once per game, on the first message of its thread — so the sandbox
   // is created exactly once and is already seeded before `run` streams a reply.
   onChatStart: async ({ chatId }) => {
     await createGameSandbox(chatId)
   },
-  onTurnComplete: async ({
-    chatId,
-    uiMessages,
-    chatAccessToken,
-    lastEventId,
-  }) => {
-    await saveGameTurn({
-      gameId: chatId,
-      messages: uiMessages,
-      chatAccessToken,
-      chatLastEventId: lastEventId,
-    })
+  // Each run mints its own token, so a continuation has to replace the one a
+  // reloading browser would otherwise resume with.
+  onTurnStart: async ({ chatId, chatAccessToken }) => {
+    await saveGameChatToken({ gameId: chatId, chatAccessToken })
   },
   // Resolved per turn rather than declared once, because the tools have to
   // write into this game's sandbox: the chat id is the game id, so each turn's
