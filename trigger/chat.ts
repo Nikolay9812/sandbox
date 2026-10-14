@@ -1,108 +1,147 @@
-import { anthropic } from "@ai-sdk/anthropic"
-import * as Sentry from "@sentry/node"
-import { chat } from "@trigger.dev/sdk/ai"
+import { chat, upsertIncomingMessage } from "@trigger.dev/sdk/ai"
 import { stepCountIs, streamText } from "ai"
+import { z } from "zod"
 
 import { createGameSandbox } from "@/lib/daytona/utils"
+import { gameModelSettings } from "@/lib/games/agent"
 import {
-  gameTranscriptStorage,
-  saveGameChatToken,
+  loadGameMessages,
+  saveGameMessages,
+  saveGameTurn,
 } from "@/lib/games/chat-store"
 import { gameInstructions } from "@/lib/games/instructions"
+import { DEFAULT_GAME_MODEL_ID, GAME_MODELS } from "@/lib/games/model-catalog"
+import { describeError, elapsed, logger } from "@/lib/observability"
 import { createGameTools } from "@/lib/games/tools"
+
+// Everything the browser gets to say about a turn, which is the model to run it
+// on and nothing else. The id is checked against the catalog rather than taken
+// as a string, so a tab naming a model this app doesn't offer — or one that
+// doesn't exist — is rejected here instead of at the provider.
+//
+// Optional at both levels because there is no picker yet: nothing sends client
+// data at all today, and a turn with none runs on `DEFAULT_GAME_MODEL_ID`.
+const gameClientDataSchema = z
+  .object({
+    modelId: z.enum(GAME_MODELS.map((model) => model.id)).optional(),
+  })
+  .optional()
+
+// A turn is a read-edit-read loop over the game's files, so it needs room for
+// many steps; the default of one would stop the turn dead after the first tool
+// call, before the model has said anything.
+const MAX_STEPS = 48
 
 /**
  * A game's chat thread, run as one long-lived task per conversation.
  *
  * A game owns exactly one thread and the chat id is the game id, so the
- * transcript lives on the `games` row: the runtime writes every change to it
- * through `storage`, and reads it back when a later run continues the chat.
+ * `games` row stays the source of truth for history: `hydrateMessages` reads it
+ * back at the top of every turn instead of trusting the copy the browser holds.
  *
  * Authorization happens before a session can exist, in the server actions in
  * `@/lib/games/chat-actions` — there is no Clerk session in here to scope by.
  */
 export const gameChat = chat.agent({
   id: "game-chat",
-  // A new game is created with its opening prompt already stored, and the
-  // client replays that same message to ask for the first reply. The runtime
-  // keys its transcript by message id and each save rewrites the whole thread,
-  // so the replay replaces the stored prompt rather than doubling it.
-  storage: gameTranscriptStorage,
-  // Once per worker process — continuations included — so everything this run
-  // reports, the error captured in `uiMessageStreamOptions.onError` and the
-  // logs from deep inside the tools alike, can be found by game.
-  onBoot: ({ chatId, continuation, previousRunId }) => {
-    const scope = Sentry.getGlobalScope()
-    scope.setTag("game.id", chatId)
-    scope.setAttribute("game.id", chatId)
+  clientDataSchema: gameClientDataSchema,
+  hydrateMessages: async ({ chatId, trigger, incomingMessages }) => {
+    const startedAt = performance.now()
+    const stored = await loadGameMessages(chatId)
 
-    // A chat moving to a new run is how a crash, an OOM or a cancel shows up
-    // from the conversation's side; the previous run is where to look.
-    if (continuation) {
-      Sentry.logger.info("Game chat continued in a new run", {
-        "game.id": chatId,
-        ...(previousRunId && { "trigger.previous_run.id": previousRunId }),
-      })
+    // Appends a genuinely new user message and no-ops otherwise. A new game is
+    // created with its opening prompt already stored, and the client replays
+    // that same message to ask for the first reply — this dedupes it by id.
+    const appended = upsertIncomingMessage(stored, {
+      trigger,
+      incomingMessages,
+    })
+
+    if (appended) {
+      await saveGameMessages({ gameId: chatId, messages: stored })
     }
+
+    // The top of every turn, and the one place the thread's size is visible.
+    // Message *counts*, never message content: the thread is the player's
+    // prompts and the agent's game source, both of which stay out of Sentry.
+    //
+    // `appended: false` on what should be a new turn is the signature of the
+    // dedupe swallowing a real message, which would look to the player like the
+    // agent replying to the message before theirs.
+    logger.info(logger.fmt`Chat turn starting for game ${chatId}`, {
+      "game.id": chatId,
+      "chat.stored_messages": stored.length,
+      "chat.incoming_messages": incomingMessages.length,
+      "chat.appended_incoming": appended,
+      duration_ms: elapsed(startedAt),
+    })
+
+    return stored
   },
   // Fires once per game, on the first message of its thread — so the sandbox
   // is created exactly once and is already seeded before `run` streams a reply.
   onChatStart: async ({ chatId }) => {
-    // A throw here ends the turn with an error chunk but leaves the run alive,
-    // so the task-level `onFailure` never sees it — it is reported here or not
-    // at all. `getGameSandbox` retries the create on the first tool call.
     try {
       await createGameSandbox(chatId)
     } catch (error) {
-      Sentry.captureException(error)
+      // Fires exactly once per game, and everything the agent does afterwards
+      // needs what it builds. Failing here doesn't stop the turn — the tools
+      // fall back to creating a sandbox themselves — but it does mean the first
+      // turn pays that cost mid-stream, and it is the explanation for the
+      // `getGameSandbox` warning that follows.
+      logger.error(
+        logger.fmt`Could not create the sandbox for game ${chatId}`,
+        { "game.id": chatId, ...describeError(error) }
+      )
+
       throw error
     }
   },
-  // Each run mints its own token, so a continuation has to replace the one a
-  // reloading browser would otherwise resume with.
-  onTurnStart: async ({ chatId, chatAccessToken }) => {
-    await saveGameChatToken({ gameId: chatId, chatAccessToken })
-  },
-  // One wide event per turn: enough to tell from the logs alone whether a turn
-  // did any work, was cut short by the player, or stopped to ask them.
-  onTurnComplete: async ({ chatId, turn, stopped, continuation, responseMessage }) => {
-    const parts = responseMessage?.parts ?? []
-    const toolParts = parts.filter((part) => part.type.startsWith("tool-"))
+  onTurnComplete: async ({
+    chatId,
+    uiMessages,
+    chatAccessToken,
+    lastEventId,
+    clientData,
+  }) => {
+    const startedAt = performance.now()
 
-    Sentry.logger.info("Game chat turn completed", {
+    try {
+      await saveGameTurn({
+        gameId: chatId,
+        messages: uiMessages,
+        chatAccessToken,
+        chatLastEventId: lastEventId,
+      })
+    } catch (error) {
+      // The turn's work is already in the sandbox by now; this is the write
+      // that makes it survive a reload. Losing it strands the thread on the
+      // previous turn's cursor, which is the one failure here that the player
+      // sees and the agent doesn't.
+      logger.error(
+        logger.fmt`Could not persist the finished turn for game ${chatId}`,
+        {
+          "game.id": chatId,
+          "chat.messages": uiMessages.length,
+          "chat.has_cursor": lastEventId !== undefined,
+          ...describeError(error),
+        }
+      )
+
+      throw error
+    }
+
+    // Pairs with the `Chat turn starting` log above: one of each per turn, so a
+    // turn that began and never ended is a gap rather than something to infer.
+    logger.info(logger.fmt`Chat turn complete for game ${chatId}`, {
       "game.id": chatId,
-      "game.chat.turn": turn,
-      "game.chat.stopped": stopped,
-      "game.chat.continuation": continuation,
-      "game.chat.tool_calls": toolParts.length,
-      "game.chat.asked_player": toolParts.some(
-        (part) => part.type === "tool-ask_player"
-      ),
-      "game.chat.has_response": responseMessage !== undefined,
+      "gen_ai.request.model": clientData?.modelId ?? DEFAULT_GAME_MODEL_ID,
+      "chat.messages": uiMessages.length,
+      // A turn that ends with no cursor cannot be resumed, so a reload
+      // replays it — worth being able to count.
+      "chat.has_cursor": lastEventId !== undefined,
+      duration_ms: elapsed(startedAt),
     })
-  },
-  uiMessageStreamOptions: {
-    // Model API failures and tool calls that throw (anything `expected` in
-    // `@/lib/games/tools` doesn't turn into a result) both land here, and the
-    // turn loop keeps the run alive past them — so this is the only place they
-    // are seen. The returned text is what the player sees, so it stays the AI
-    // SDK's generic default rather than the raw, possibly internal, message.
-    onError: (error) => {
-      const name = error instanceof Error ? error.name : typeof error
-
-      // A malformed or unknown tool call is the model's mistake, and it reads
-      // the error and retries on the next step — notable, but not an issue.
-      if (name === "AI_InvalidToolInputError" || name === "AI_NoSuchToolError") {
-        Sentry.logger.warn("Game chat tool call rejected", {
-          "error.type": name,
-          "gen_ai.tool.name": (error as { toolName?: string }).toolName ?? "unknown",
-        })
-      } else {
-        Sentry.captureException(error)
-      }
-
-      return "An error occurred."
-    },
   },
   // Resolved per turn rather than declared once, because the tools have to
   // write into this game's sandbox: the chat id is the game id, so each turn's
@@ -111,13 +150,17 @@ export const gameChat = chat.agent({
   // only passed there: history re-converted at the top of a later turn needs
   // the same set to make sense of the tool calls already in it.
   tools: ({ chatId }) => createGameTools(chatId),
-  run: async ({ messages, tools, signal }) =>
+  run: async ({ messages, tools, signal, clientData }) =>
     streamText({
       // Spread first, so every option below still wins. Wires up the
       // `prepareStep` behind compaction, steering and background injection —
       // all of which silently no-op without it.
       ...chat.toStreamTextOptions({ tools }),
-      model: anthropic("claude-opus-5"),
+      // Read per turn rather than fixed for the thread, so switching models
+      // mid-conversation takes effect on the next message and carries the
+      // history with it. Spread rather than assigned because what varies with
+      // the model is `model` today and may not be only that later.
+      ...gameModelSettings(clientData?.modelId ?? DEFAULT_GAME_MODEL_ID),
       // `instructions`, not the deprecated `system`. Passed here rather than
       // through `chat.prompt.set()` because the prompt is static — there is no
       // per-chat or dashboard-versioned part of it to resolve in a hook.
@@ -125,9 +168,6 @@ export const gameChat = chat.agent({
       messages,
       // Fires on stop and on cancel. Without it, Stop only updates the UI.
       abortSignal: signal,
-      // A turn is a read-edit-read loop over the game's files, so it needs
-      // room for many steps; the default of one would stop the turn dead
-      // after the first tool call, before the model has said anything.
-      stopWhen: stepCountIs(48),
+      stopWhen: stepCountIs(MAX_STEPS),
     }),
 })
