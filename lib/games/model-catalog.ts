@@ -14,7 +14,7 @@ export const GAME_MODELS = [
   {
     id: "claude-opus-5",
     name: "Opus 5",
-    tagline: "The most capable builder - best for a game from scratch.",
+    tagline: "The most capable builder — best for a game from scratch.",
   },
   {
     id: "claude-sonnet-5",
@@ -24,7 +24,7 @@ export const GAME_MODELS = [
   {
     id: "claude-haiku-4-5",
     name: "Haiku 4.5",
-    tagline: "The quickes and cheapest - best for small, specific tweaks",
+    tagline: "The quickest and cheapest — best for small, specific tweaks.",
   },
 ] as const
 
@@ -44,3 +44,14 @@ export type GameModelId = (typeof GAME_MODELS)[number]["id"]
  * app actually uses, not a fallback that rarely fires.
  */
 export const DEFAULT_GAME_MODEL_ID: GameModelId = "claude-opus-5"
+
+/**
+ * Whether a value names a model this app offers.
+ *
+ * A guard rather than a bare comparison, because the places that need it take
+ * the id from somewhere the app doesn't control — a URL, a server action's
+ * arguments — and want the narrowed type on the other side of the check.
+ */
+export function isGameModelId(value: unknown): value is GameModelId {
+  return GAME_MODELS.some((model) => model.id === value)
+}
