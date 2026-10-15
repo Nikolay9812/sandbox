@@ -1,12 +1,18 @@
 "use client"
 
 import { OrganizationSwitcher, UserButton } from "@clerk/nextjs"
-import { CoinsIcon, MessageSquareIcon, SquarePenIcon } from "lucide-react"
+import {
+  CoinsIcon,
+  EllipsisIcon,
+  MessageSquareIcon,
+  SquarePenIcon,
+} from "lucide-react"
 import Image from "next/image"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 
 import { useCreditBalance } from "@/components/credit-balance"
+import { GameMenu } from "@/components/game-menu"
 import { Empty, EmptyDescription } from "@/components/ui/empty"
 import {
   Popover,
@@ -25,6 +31,7 @@ import {
   SidebarGroupLabel,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuBadge,
   SidebarMenuButton,
   SidebarMenuItem,
@@ -91,6 +98,17 @@ export function AppSidebar({
                     >
                       <span>{game.title}</span>
                     </SidebarMenuButton>
+                    <GameMenu
+                      gameId={game.id}
+                      title={game.title}
+                      trigger={
+                        <SidebarMenuAction showOnHover>
+                          <EllipsisIcon />
+                        </SidebarMenuAction>
+                      }
+                      side="right"
+                      align="start"
+                    />
                   </SidebarMenuItem>
                 ))}
               </SidebarMenu>

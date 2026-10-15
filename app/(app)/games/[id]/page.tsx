@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server"
 import { notFound } from "next/navigation"
 
 import { GameChat } from "@/components/game-chat"
+import { GameMenu } from "@/components/game-menu"
 import { DEFAULT_GAME_MODEL_ID, isGameModelId } from "@/lib/games/model-catalog"
 import { getGame } from "@/lib/games/queries"
 
@@ -25,22 +26,30 @@ export default async function GamePage({
   const { model } = await searchParams
 
   return (
-    <GameChat
-      gameId={game.id}
-      initialMessages={game.messages}
-      initialModelId={isGameModelId(model) ? model : DEFAULT_GAME_MODEL_ID}
-      sandboxId={game.sandboxId}
-      // The chat session the last turn persisted. Absent until a game has had
-      // one, and the token may already have expired — the transport refreshes
-      // it through the mint action on a 401.
-      initialSession={
-        game.chatAccessToken
-          ? {
-              publicAccessToken: game.chatAccessToken,
-              lastEventId: game.chatLastEventId ?? undefined,
-            }
-          : undefined
-      }
-    />
+    // The chat fills whatever height the header leaves, so the window height
+    // is set here rather than in the chat.
+    <div className="flex h-svh flex-col">
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
+        <h1 className="min-w-0 flex-1 truncate text-sm">{game.title}</h1>
+        <GameMenu gameId={game.id} title={game.title} />
+      </header>
+      <GameChat
+        gameId={game.id}
+        initialMessages={game.messages}
+        initialModelId={isGameModelId(model) ? model : DEFAULT_GAME_MODEL_ID}
+        sandboxId={game.sandboxId}
+        // The chat session the last turn persisted. Absent until a game has had
+        // one, and the token may already have expired — the transport refreshes
+        // it through the mint action on a 401.
+        initialSession={
+          game.chatAccessToken
+            ? {
+                publicAccessToken: game.chatAccessToken,
+                lastEventId: game.chatLastEventId ?? undefined,
+              }
+            : undefined
+        }
+      />
+    </div>
   )
 }

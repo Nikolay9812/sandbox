@@ -2,7 +2,11 @@ import type { Dirent } from "node:fs"
 import { readdir } from "node:fs/promises"
 import path from "node:path"
 
-import type { Sandbox } from "@daytona/sdk"
+import {
+  DaytonaGoneError,
+  DaytonaNotFoundError,
+  type Sandbox,
+} from "@daytona/sdk"
 // `@sentry/node` rather than `@sentry/nextjs`: this module runs in both the
 // Trigger.dev worker and the Next.js server, and both clients register on the
 // same global carrier, so the logs land on whichever one is initialized.
@@ -36,7 +40,12 @@ const RUNTIME_DIR = path.join(process.cwd(), "lib/games/runtime")
  *
  * The sandbox id is saved last: a row with a `sandboxId` therefore always names
  * a sandbox that exists and is seeded, and a crash in between leaks an unused
- * sandbox rather than pointing the game at a half-built one.
+ * sandbox rather than pointing the game at a half-built one. A leaked sandbox
+ * still carries the `gameId` label, so deleting the game sweeps it up anyway.
+ *
+ * A game deleted while its sandbox is being built has no row left to save the
+ * id to, and the sweep that follows the delete may already have run, so the
+ * sandbox is deleted here rather than left for it.
  */
 export async function createGameSandbox(
   gameId: string
@@ -46,10 +55,19 @@ export async function createGameSandbox(
 
   const seededFiles = await seedRuntime(sandbox)
 
-  await db
+  const [game] = await db
     .update(games)
     .set({ sandboxId: sandbox.id })
     .where(eq(games.id, gameId))
+    .returning({ id: games.id })
+
+  if (!game) {
+    await deleteSandbox(sandbox)
+
+    throw new Error(
+      `Game ${gameId} was deleted while its sandbox was being created`
+    )
+  }
 
   Sentry.logger.info("Game sandbox created", {
     "game.id": gameId,
@@ -59,6 +77,47 @@ export async function createGameSandbox(
   })
 
   return { sandbox }
+}
+
+/**
+ * Deletes every sandbox belonging to a game, and returns how many there were.
+ *
+ * Found by the `gameId` label rather than by the row's `sandboxId`, so it also
+ * catches sandboxes the row never learned about, such as one from a create
+ * that crashed before saving its id. Sandboxes already on their way out are
+ * skipped, so a retried sweep doesn't trip over its own earlier deletes.
+ */
+export async function deleteGameSandboxes(gameId: string): Promise<number> {
+  const sandboxes: Sandbox[] = []
+
+  for await (const sandbox of daytona.list({ labels: { gameId } })) {
+    if (sandbox.state !== "destroyed" && sandbox.state !== "destroying") {
+      sandboxes.push(sandbox)
+    }
+  }
+
+  await Promise.all(sandboxes.map(deleteSandbox))
+
+  return sandboxes.length
+}
+
+/**
+ * Deletes a sandbox, treating one that is already gone as deleted — the sweep
+ * and the guard in `createGameSandbox` can both reach the same sandbox.
+ */
+async function deleteSandbox(sandbox: Sandbox): Promise<void> {
+  try {
+    await sandbox.delete()
+  } catch (error) {
+    if (
+      error instanceof DaytonaNotFoundError ||
+      error instanceof DaytonaGoneError
+    ) {
+      return
+    }
+
+    throw error
+  }
 }
 
 /**

@@ -3,7 +3,9 @@
 import { anthropic } from "@ai-sdk/anthropic"
 import { auth } from "@clerk/nextjs/server"
 import * as Sentry from "@sentry/nextjs"
+import { tasks } from "@trigger.dev/sdk"
 import { generateText } from "ai"
+import { eq } from "drizzle-orm"
 import { refresh } from "next/cache"
 import { redirect } from "next/navigation"
 
@@ -14,7 +16,9 @@ import {
   type GameModelId,
   isGameModelId,
 } from "@/lib/games/model-catalog"
+import { getGame } from "@/lib/games/queries"
 import { describeError, elapsed } from "@/lib/observability"
+import type { deleteGameResources } from "@/trigger/delete-game"
 
 const TITLE_MODEL = "claude-haiku-4-5"
 
@@ -178,4 +182,96 @@ export async function createGame(prompt: string, modelId: GameModelId) {
       ? `/games/${game.id}`
       : `/games/${game.id}?model=${model}`
   )
+}
+/**
+ * Resolves a game the caller's active organization owns, or throws.
+ *
+ * The id arrives from the browser and these actions are reachable by direct
+ * POST, so ownership is checked here rather than assumed from the page the
+ * request came from — `getGame` only resolves the caller's own org's games.
+ */
+async function authorizeGame(gameId: string, action: string) {
+  const { userId, orgId } = await auth()
+  const game = await getGame(gameId)
+
+  if (!userId || !orgId || !game) {
+    Sentry.logger.warn("Game action denied", {
+      "app.action": action,
+      "game.id": gameId,
+      "user.id": userId ?? "anonymous",
+      "organization.id": orgId ?? "none",
+    })
+
+    throw new Error("Not Found")
+  }
+
+  return { game, userId, orgId }
+}
+
+/**
+ * Renames a game. A title that is blank once trimmed is refused rather than
+ * saved, since the sidebar and header have nothing else to show for a game.
+ */
+export async function renameGame(gameId: string, title: string) {
+  const { game } = await authorizeGame(gameId, "renameGame")
+
+  const trimmedTitle = typeof title === "string" ? title.trim() : ""
+
+  if (!trimmedTitle) {
+    throw new Error("A game needs a title.")
+  }
+
+  await db
+    .update(games)
+    .set({ title: truncate(trimmedTitle) })
+    .where(eq(games.id, game.id))
+
+  // The title shows in the sidebar as well as the page header, and both come
+  // from server components the router has already cached.
+  refresh()
+}
+
+/**
+ * Deletes a game and everything it owns, then leaves for the home page when
+ * `leave` says the caller is on the game's own page.
+ *
+ * The row goes here; the chat session and the Daytona sandboxes go in the
+ * `delete-game-resources` task, which retries until they are gone. The task is
+ * triggered inside the transaction that deletes the row, so a trigger that
+ * fails rolls the delete back — the game stays, and can be deleted again —
+ * instead of leaving sandboxes with no row and nothing coming to clean them up.
+ */
+export async function deleteGame(gameId: string, leave: boolean) {
+  const startedAt = performance.now()
+  const { game, userId, orgId } = await authorizeGame(gameId, "deleteGame")
+
+  await db.transaction(async (tx) => {
+    await tx.delete(games).where(eq(games.id, game.id))
+
+    await tasks.trigger<typeof deleteGameResources>("delete-game-resources", {
+      gameId: game.id,
+    })
+  })
+
+  Sentry.logger.info(Sentry.logger.fmt`Deleted game ${game.id}`, {
+    "app.action": "deleteGame",
+    "game.id": game.id,
+    "user.id": userId,
+    "organization.id": orgId,
+    "game.had_sandbox": game.sandboxId !== null,
+    duration_ms: elapsed(startedAt),
+  })
+
+  // The sidebar still lists the game until the layout renders again.
+  refresh()
+
+  // Only a caller looking at the game has to leave it: from anywhere else —
+  // the sidebar, on another page — the refresh above is all that changes.
+  // Redirected here rather than by the caller, since a refresh alone would
+  // re-render the deleted game's page as a 404 before any client navigation.
+  //
+  // `redirect` throws, so nothing may follow it here.
+  if (leave) {
+    redirect("/")
+  }
 }
