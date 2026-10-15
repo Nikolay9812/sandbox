@@ -31,6 +31,12 @@ export const GAME_DIR = "/home/daytona/game"
 // local dev, where the cwd is the project root.
 const RUNTIME_DIR = path.join(process.cwd(), "lib/games/runtime")
 
+// A stopped sandbox still holds its disk against the org's quota until it is
+// archived, and Daytona's default wait for that is 7 days — long enough for a
+// handful of idle games to fill the quota and fail every new sandbox with
+// "Total disk limit exceeded". `ensureStarted` restores an archived one.
+const AUTO_ARCHIVE_MINUTES = 60
+
 /**
  * Creates the Daytona sandbox a game is built in and records it on the game.
  *
@@ -51,7 +57,10 @@ export async function createGameSandbox(
   gameId: string
 ): Promise<{ sandbox: Sandbox }> {
   const startedAt = performance.now()
-  const sandbox = await daytona.create({ labels: { gameId } })
+  const sandbox = await daytona.create({
+    labels: { gameId },
+    autoArchiveInterval: AUTO_ARCHIVE_MINUTES,
+  })
 
   const seededFiles = await seedRuntime(sandbox)
 

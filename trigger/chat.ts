@@ -115,6 +115,26 @@ export const gameChat = chat.agent({
   // the same set to make sense of the tool calls already in it.
   tools: ({ chatId }) => createGameTools(chatId),
   run: async ({ chatId, messages, tools, signal, clientData }) => {
+    // A turn with nothing to answer. The history ends on the agent's own reply,
+    // which means whatever opened this turn added no message to it — a thread
+    // submitted twice, or a tab asking for a reply it has already been given.
+    // A trailing assistant message is read as a prefill for the model to carry
+    // on from, and these models refuse one outright, so the turn would die at
+    // the provider rather than quietly do nothing. Returning no stream ends it
+    // here instead: nothing generated, nothing charged, nothing added to the
+    // thread.
+    if (messages.at(-1)?.role === "assistant") {
+      logger.warn(
+        logger.fmt`Skipped a turn with nothing to answer for game ${chatId}`,
+        {
+          "game.id": chatId,
+          "chat.messages": messages.length,
+        }
+      )
+
+      return
+    }
+
     const modelId = clientData?.modelId ?? DEFAULT_GAME_MODEL_ID
     // Looked up per turn, since the game id is all the session carries. Taken
     // from the game's row rather than `clientData`, which the browser writes.
