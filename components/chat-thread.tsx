@@ -16,6 +16,7 @@ import {
   CircleQuestionMarkIcon,
 } from "lucide-react"
 import Image from "next/image"
+import Link from "next/link"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { ChatComposer } from "@/components/chat-composer"
@@ -53,6 +54,18 @@ import { cn } from "@/lib/utils"
 // Type-only: the agent module reaches the server bundle, never the browser.
 import type { gameChat } from "@/trigger/chat"
 
+/**
+ * The session refused to start because the org has no credits. Thrown from the
+ * transport's `startSession` so it reaches `onError` as itself, where the
+ * thread tells it apart from a turn that actually broke.
+ */
+class OutOfCreditsError extends Error {
+  constructor() {
+    super("The organization is out of credits")
+    this.name = "OutOfCreditsError"
+  }
+}
+
 /** The tool the agent asks with, rather than one it edits the game with. */
 const ASK_PLAYER = "ask_player"
 
@@ -87,8 +100,13 @@ export function ChatThread({
   const transport = useTriggerChatTransport<typeof gameChat>({
     task: "game-chat",
     accessToken: ({ chatId }) => mintGameChatAccessToken(chatId),
-    startSession: ({ chatId, clientData }) =>
-      startGameChatSession({ chatId, clientData }),
+    startSession: async ({ chatId, clientData }) => {
+      const result = await startGameChatSession({ chatId, clientData })
+      if ("outOfCredits" in result) {
+        throw new OutOfCreditsError()
+      }
+      return result
+    },
     // Merged into every turn's metadata, and handed to `startSession` for the
     // first one, so the agent reads the current pick rather than the one the
     // thread opened on. The agent validates it against the same catalog.
@@ -104,6 +122,11 @@ export function ChatThread({
   const messageCount = useRef(0)
 
   const { setBalance } = useCreditBalance()
+
+  // Set when the first turn could not start for lack of credits. Later turns
+  // are refused by the agent itself, with a reply saved to the thread, so this
+  // only covers the one turn that never reached it.
+  const [outOfCredits, setOutOfCredits] = useState(false)
 
   const {
     messages,
@@ -148,6 +171,12 @@ export function ChatThread({
     // its side only when the run itself failed, and a transport error never
     // gets that far.
     onError: (error) => {
+      // Not a failure: nothing ran, and the player is told why below.
+      if (error instanceof OutOfCreditsError) {
+        setOutOfCredits(true)
+        return
+      }
+
       Sentry.logger.error(
         Sentry.logger.fmt`Chat turn failed for game ${gameId}`,
         {
@@ -191,6 +220,7 @@ export function ChatThread({
   }, [gameId, initialMessages, sendMessage])
 
   function handleSubmit(value: string) {
+    setOutOfCredits(false)
     sendMessage({ text: value })
     setPrompt("")
   }
@@ -309,6 +339,33 @@ export function ChatThread({
                   </Message>
                 </MessageScrollerItem>
               ))}
+              {outOfCredits && (
+                <MessageScrollerItem messageId="out-of-credits">
+                  <Message align="start">
+                    <MessageAvatar className="size-8 self-start rounded-lg bg-transparent">
+                      <Image
+                        src="/logo.svg"
+                        alt="Sandbox"
+                        width={32}
+                        height={32}
+                        className="size-8"
+                      />
+                    </MessageAvatar>
+                    <MessageContent>
+                      <Bubble variant="ghost" align="start">
+                        <BubbleContent>
+                          You&apos;re out of credits, so I can&apos;t start
+                          building yet. Add credits on the{" "}
+                          <Link href="/billing" className="underline">
+                            Billing page
+                          </Link>
+                          , then send your message again.
+                        </BubbleContent>
+                      </Bubble>
+                    </MessageContent>
+                  </Message>
+                </MessageScrollerItem>
+              )}
             </MessageScrollerContent>
           </MessageScrollerViewport>
           <MessageScrollerButton />

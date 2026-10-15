@@ -1,9 +1,18 @@
 import { chat } from "@trigger.dev/sdk/ai"
-import { stepCountIs, streamText, type StepResult, type ToolSet } from "ai"
+import {
+  createUIMessageStream,
+  stepCountIs,
+  streamText,
+  type StepResult,
+  type ToolSet,
+  type UIMessage,
+  type UIMessageStreamOptions,
+} from "ai"
 import { z } from "zod"
 
 import { chargeStep, getBalance } from "@/lib/billing/ledger"
 import { stepCost } from "@/lib/billing/pricing"
+import { checkCredits } from "@/lib/billing/reconcile"
 import { createGameSandbox } from "@/lib/daytona/utils"
 import { gameModelSettings } from "@/lib/games/agent"
 import {
@@ -107,8 +116,25 @@ export const gameChat = chat.agent({
   tools: ({ chatId }) => createGameTools(chatId),
   run: async ({ chatId, messages, tools, signal, clientData }) => {
     const modelId = clientData?.modelId ?? DEFAULT_GAME_MODEL_ID
-    // Looked up per turn, since the game id is all the session carries.
+    // Looked up per turn, since the game id is all the session carries. Taken
+    // from the game's row rather than `clientData`, which the browser writes.
     const orgId = await loadGameOrgId(chatId)
+
+    // Checked once per turn, before the model is called: a turn that starts
+    // with credit runs to the end even if its steps take the balance below
+    // zero, and the next one is refused here.
+    if (orgId) {
+      const { hasCredits, balance } = await checkCredits(orgId)
+      if (!hasCredits) {
+        logger.info(logger.fmt`Chat turn refused for game ${chatId}`, {
+          "game.id": chatId,
+          "org.id": orgId,
+          "billing.balance": balance,
+        })
+
+        return fixedReply(OUT_OF_CREDITS_REPLY)
+      }
+    }
 
     return streamText({
       // Spread first, so every option below still wins. Wires up the
@@ -134,6 +160,35 @@ export const gameChat = chat.agent({
     })
   },
 })
+
+const OUT_OF_CREDITS_REPLY =
+  "You're out of credits, so I can't keep building for now. Add credits on the Billing page, then send your message again."
+
+/**
+ * A reply written by the app instead of the model.
+ *
+ * Shaped like what `streamText` returns as far as `chat.agent` is concerned,
+ * which is `toUIMessageStream` and nothing else, so the runtime pipes it and
+ * saves it to the thread exactly as it would a model's answer: the player sees
+ * it in the chat, and it is still there after a reload.
+ */
+function fixedReply(text: string) {
+  return {
+    toUIMessageStream: (options: UIMessageStreamOptions<UIMessage> = {}) =>
+      createUIMessageStream({
+        originalMessages: options.originalMessages,
+        generateId: options.generateMessageId,
+        onEnd: options.onEnd ?? options.onFinish,
+        execute: ({ writer }) => {
+          writer.write({ type: "start" })
+          writer.write({ type: "text-start", id: "reply" })
+          writer.write({ type: "text-delta", id: "reply", delta: text })
+          writer.write({ type: "text-end", id: "reply" })
+          writer.write({ type: "finish", finishReason: "stop" })
+        },
+      }),
+  }
+}
 
 /**
  * Charges one step to the game's org and tells the browser the new balance.

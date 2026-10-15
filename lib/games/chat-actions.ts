@@ -3,8 +3,13 @@
 import { auth } from "@clerk/nextjs/server"
 import * as Sentry from "@sentry/nextjs"
 import { auth as triggerAuth } from "@trigger.dev/sdk"
-import { chat, type ChatStartSessionParams } from "@trigger.dev/sdk/ai"
+import {
+  chat,
+  type ChatStartSessionParams,
+  type ChatStartSessionResult,
+} from "@trigger.dev/sdk/ai"
 
+import { checkCredits } from "@/lib/billing/reconcile"
 import { getGame } from "@/lib/games/queries"
 import type { gameChat } from "@/trigger/chat"
 
@@ -16,7 +21,7 @@ const startSession = chat.createStartSessionAction<typeof gameChat>("game-chat")
  * for a chat session — being signed in is not the same as being entitled to
  * this game's thread, and the id arrives from the browser.
  */
-async function authorizeGame(gameId: string) {
+async function authorizeGame(gameId: string): Promise<{ orgId: string }> {
   const { userId, orgId } = await auth()
 
   // Denials are logged as well as thrown: the throw reads as one more failed
@@ -42,17 +47,35 @@ async function authorizeGame(gameId: string) {
 
     throw new Error("Not Found")
   }
+
+  return { orgId }
 }
 
 /**
  * Creates the chat session and triggers its first run, then returns a
  * session-scoped token. Idempotent on (environment, chatId), so two tabs
  * converge on one session.
+ *
+ * An org out of credits gets `{ outOfCredits: true }` instead, and no run is
+ * triggered. Returned rather than thrown, because Next replaces a server
+ * action's error with a generic one in production, and the thread needs to
+ * tell this apart from a real failure to show the player why nothing happened.
  */
 export async function startGameChatSession(
   params: ChatStartSessionParams<typeof gameChat>
-) {
-  await authorizeGame(params.chatId)
+): Promise<ChatStartSessionResult | { outOfCredits: true }> {
+  const { orgId } = await authorizeGame(params.chatId)
+
+  const { hasCredits, balance } = await checkCredits(orgId)
+  if (!hasCredits) {
+    Sentry.logger.info("Game chat session refused, out of credits", {
+      "game.id": params.chatId,
+      "org.id": orgId,
+      "billing.balance": balance,
+    })
+
+    return { outOfCredits: true }
+  }
 
   const session = await startSession(params)
 

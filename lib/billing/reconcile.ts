@@ -1,10 +1,17 @@
-import "server-only"
+// No `server-only` guard, and `@clerk/backend` rather than `@clerk/nextjs`:
+// the chat agent syncs an empty balance from inside the Trigger.dev worker,
+// where neither the guard nor Next's Clerk entry points work. Nothing here
+// reads a Clerk session — every caller passes the org it has already
+// authorized.
+import { createClerkClient } from "@clerk/backend"
+import { isClerkAPIResponseError } from "@clerk/backend/errors"
 
-import { isClerkAPIResponseError } from "@clerk/nextjs/errors"
-import { clerkClient } from "@clerk/nextjs/server"
-
-import { creditLedger, db, type NewCreditLedgerEntry } from "@/lib/db"
 import { DOLLAR } from "@/lib/billing/format"
+import { getBalance } from "@/lib/billing/ledger"
+import { creditLedger, db, type NewCreditLedgerEntry } from "@/lib/db/client"
+import { describeError, logger } from "@/lib/observability"
+
+const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY })
 
 const MONTHLY_GRANT = 10 * DOLLAR
 
@@ -23,9 +30,7 @@ const PAID_STATUSES = new Set(["active", "canceled"])
 export async function reconcileCredits(orgId: string): Promise<void> {
   let subscription
   try {
-    subscription = await (
-      await clerkClient()
-    ).billing.getOrganizationBillingSubscription(orgId)
+    subscription = await clerk.billing.getOrganizationBillingSubscription(orgId)
   } catch (error) {
     // An org that has never had a subscription has nothing to grant.
     if (isClerkAPIResponseError(error) && error.status === 404) {
@@ -60,6 +65,34 @@ export async function reconcileCredits(orgId: string): Promise<void> {
     .onConflictDoNothing({
       target: [creditLedger.orgId, creditLedger.entryKey],
     })
+}
+
+/**
+ * Whether the org can start a build, and the balance that decided it.
+ *
+ * An empty balance is synced with the subscription once before it counts,
+ * because the month may have renewed since anything last looked. A sync that
+ * fails leaves the balance as it was: the org is told it is out of credits
+ * rather than handed a build nobody knows it paid for.
+ */
+export async function checkCredits(
+  orgId: string
+): Promise<{ hasCredits: boolean; balance: number }> {
+  let balance = await getBalance(orgId)
+
+  if (balance <= 0) {
+    try {
+      await reconcileCredits(orgId)
+      balance = await getBalance(orgId)
+    } catch (error) {
+      logger.error(logger.fmt`Could not sync credits for org ${orgId}`, {
+        "org.id": orgId,
+        ...describeError(error),
+      })
+    }
+  }
+
+  return { hasCredits: balance > 0, balance }
 }
 
 /**
