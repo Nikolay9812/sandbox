@@ -4,7 +4,7 @@ import { isClerkAPIResponseError } from "@clerk/nextjs/errors"
 import { clerkClient } from "@clerk/nextjs/server"
 
 import { creditLedger, db, type NewCreditLedgerEntry } from "@/lib/db"
-import { DOLLAR } from "@/lib/billing/ledger"
+import { DOLLAR } from "@/lib/billing/format"
 
 const MONTHLY_GRANT = 10 * DOLLAR
 

@@ -108,3 +108,20 @@ export async function saveGameChatToken({
 }): Promise<void> {
   await db.update(games).set({ chatAccessToken }).where(eq(games.id, gameId))
 }
+
+/**
+ * The org that owns a game, which is the org its turns are charged to.
+ *
+ * `undefined` when the game was deleted under a live session.
+ */
+export async function loadGameOrgId(
+  gameId: string
+): Promise<string | undefined> {
+  const [game] = await db
+    .select({ orgId: games.orgId })
+    .from(games)
+    .where(eq(games.id, gameId))
+    .limit(1)
+
+  return game?.orgId
+}

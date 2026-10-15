@@ -6,6 +6,7 @@ import Image from "next/image"
 import Link from "next/link"
 import { usePathname } from "next/navigation"
 
+import { useCreditBalance } from "@/components/credit-balance"
 import { Empty, EmptyDescription } from "@/components/ui/empty"
 import {
   Popover,
@@ -34,14 +35,10 @@ import type { Game } from "@/lib/db/schema"
 
 export function AppSidebar({
   games,
-  balance,
   ...props
-}: React.ComponentProps<typeof Sidebar> & {
-  games: Game[]
-  // Available credits in ledger units, or null without an active org.
-  balance: number | null
-}) {
+}: React.ComponentProps<typeof Sidebar> & { games: Game[] }) {
   const pathname = usePathname()
+  const { balance } = useCreditBalance()
 
   return (
     <Sidebar collapsible="icon" {...props}>

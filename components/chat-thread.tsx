@@ -19,6 +19,7 @@ import Image from "next/image"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { ChatComposer } from "@/components/chat-composer"
+import { useCreditBalance } from "@/components/credit-balance"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { Marker, MarkerContent, MarkerIcon } from "@/components/ui/marker"
 import { Message, MessageAvatar, MessageContent } from "@/components/ui/message"
@@ -102,6 +103,8 @@ export function ChatThread({
   // when the callback was made rather than when the turn failed.
   const messageCount = useRef(0)
 
+  const { setBalance } = useCreditBalance()
+
   const {
     messages,
     sendMessage,
@@ -131,6 +134,13 @@ export function ChatThread({
     // on an error, still leaves every file it wrote on disk — that is what the
     // player is running now, so it is what the preview should show.
     onFinish: onTurnComplete,
+    // The agent charges the org after every step and streams the balance that
+    // leaves, so the sidebar counts down while the game is being built.
+    onData: (part) => {
+      if (part.type === "data-balance" && isBalanceData(part.data)) {
+        setBalance(part.data.balance)
+      }
+    },
     // A turn that dies — the run failing, the transport losing the stream,
     // a token that could not be refreshed — settles the status back to ready
     // and leaves the thread looking like the agent simply had nothing to say.
@@ -615,4 +625,12 @@ function askPlayerAnswer(output: unknown): string | undefined {
   const { label } = output as { label?: unknown }
 
   return typeof label === "string" && label !== "" ? label : undefined
+}
+
+function isBalanceData(data: unknown): data is { balance: number } {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    typeof (data as { balance?: unknown }).balance === "number"
+  )
 }
