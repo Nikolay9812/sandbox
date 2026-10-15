@@ -24,11 +24,11 @@ export const games = pgTable(
       .$type<UIMessage[]>()
       .notNull()
       .default(sql`'[]'::jsonb`),
-    // Trigger.dev chat session state for the thread above. The token is
-    // refreshed by the agent's `onTurnStart`; everything else is written by its
-    // transcript storage in the same statement as the messages. The out cursor
-    // is what a reloading browser resumes an interrupted turn from, so it must
-    // never be written ahead of the messages it points past.
+    // Trigger.dev chat session state for the thread above. The token and the
+    // out cursor are written by the agent's `onTurnComplete`, in the same
+    // statement as the messages. The out cursor is what a reloading browser
+    // resumes an interrupted turn from, so it must never be written ahead of
+    // the messages it points past.
     chatAccessToken: text("chat_access_token"),
     chatLastEventId: text("chat_last_event_id"),
     chatLastInEventId: text("chat_last_in_event_id"),

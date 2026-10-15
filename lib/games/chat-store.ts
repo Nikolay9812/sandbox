@@ -1,5 +1,4 @@
 import * as Sentry from "@sentry/node"
-import type { TranscriptStorage } from "@trigger.dev/sdk/ai"
 import type { UIMessage } from "ai"
 import { eq } from "drizzle-orm"
 
@@ -8,105 +7,75 @@ import { eq } from "drizzle-orm"
 // entry would throw.
 import { db, games } from "@/lib/db/client"
 
+// Lookups here are by id alone, with no org scoping, unlike `getGame`. The
+// caller is the chat agent, which has no Clerk session to scope by — a game id
+// only ever reaches it through a session the server actions in
+// `@/lib/games/chat-actions` already authorized against the caller's org.
+
 /**
- * Where the game chat agent keeps its transcript: the game's own row.
+ * The game's thread as the row holds it, which is the history every turn is
+ * rebuilt from.
  *
- * The thread is kept whole in `games.messages`, so `save` writes the
- * changeset's full `transcript` rather than applying its individual changes.
- *
- * Lookups here are by id alone, with no org scoping, unlike `getGame`. The
- * caller is the chat agent, which has no Clerk session to scope by — a game id
- * only ever reaches it through a session the server actions in
- * `@/lib/games/chat-actions` already authorized against the caller's org.
+ * Empty when the game was deleted under a live session: only an authorized
+ * session can name a chat, so a missing row means the game went away after.
  */
-export const gameTranscriptStorage: TranscriptStorage = {
-  async load<TUIMessage extends UIMessage = UIMessage>(
-    { chatId }: { chatId: string },
-    opts?: { limit?: number; before?: string }
-  ) {
-    const [game] = await db
-      .select({
-        messages: games.messages,
-        state: games.chatState,
-        lastOutEventId: games.chatLastEventId,
-        lastInEventId: games.chatLastInEventId,
-        nonFinalIds: games.chatNonFinalIds,
-      })
-      .from(games)
-      .where(eq(games.id, chatId))
-      .limit(1)
+export async function loadGameMessages(gameId: string): Promise<UIMessage[]> {
+  const [game] = await db
+    .select({ messages: games.messages })
+    .from(games)
+    .where(eq(games.id, gameId))
+    .limit(1)
 
-    // Only an authorized session can name a chat, so a missing row means the
-    // game was deleted under a live session — and the agent starts it blank.
-    if (!game) {
-      Sentry.logger.warn("Game transcript not found, starting empty", {
-        "game.id": chatId,
-      })
+  if (!game) {
+    Sentry.logger.warn("Game thread not found, starting empty", {
+      "game.id": gameId,
+    })
 
-      return { messages: [], state: null }
-    }
+    return []
+  }
 
-    const cursors = {
-      lastOutEventId: game.lastOutEventId ?? undefined,
-      lastInEventId: game.lastInEventId ?? undefined,
-    }
-
-    // The runtime always asks for the whole thread; `limit` and `before` are
-    // only used by paged history reads.
-    let messages = game.messages
-    let nextCursor: string | undefined
-    if (opts?.before) {
-      const end = messages.findIndex((message) => message.id === opts.before)
-      messages = end === -1 ? [] : messages.slice(0, end)
-    }
-    if (opts?.limit && messages.length > opts.limit) {
-      messages = messages.slice(-opts.limit)
-      nextCursor = messages[0]?.id
-    }
-
-    return {
-      messages: messages as TUIMessage[],
-      state: game.state ?? null,
-      cursors,
-      nextCursor,
-      nonFinalIds: game.nonFinalIds,
-    }
-  },
-
-  // One statement, so the thread and its cursor can't diverge: a reload
-  // landing between separate writes would resume from a cursor that points
-  // past messages the row doesn't have yet, and replay the turn on top of
-  // itself.
-  async save({ chatId }, { transcript, cursors }) {
-    await db
-      .update(games)
-      .set({
-        messages: transcript.entries.map((entry) => entry.message),
-        chatState: transcript.state,
-        chatNonFinalIds: transcript.entries
-          .filter((entry) => !entry.final)
-          .map((entry) => entry.id),
-        // Left out (and so left as they are) when the save carries no cursor.
-        chatLastEventId: cursors?.lastOutEventId,
-        chatLastInEventId: cursors?.lastInEventId,
-      })
-      .where(eq(games.id, chatId))
-  },
+  return game.messages
 }
 
 /**
- * Records the session token a reloading browser resumes the chat with.
- *
- * A continuation run mints a fresh one, so it is refreshed on every turn.
+ * Writes the thread down without touching the session, for a turn that has
+ * started but not finished — its cursor isn't known yet.
  */
-export async function saveGameChatToken({
+export async function saveGameMessages({
   gameId,
-  chatAccessToken,
+  messages,
 }: {
   gameId: string
-  chatAccessToken: string
+  messages: UIMessage[]
 }): Promise<void> {
-  await db.update(games).set({ chatAccessToken }).where(eq(games.id, gameId))
+  await db.update(games).set({ messages }).where(eq(games.id, gameId))
+}
+
+/**
+ * Writes a finished turn: the thread, and the session a reloading browser
+ * resumes it with.
+ *
+ * One statement, so the thread and its cursor can't diverge: a reload landing
+ * between separate writes would resume from a cursor that points past messages
+ * the row doesn't have yet, and replay the turn on top of itself. The token is
+ * written every turn because a continuation run mints a fresh one.
+ */
+export async function saveGameTurn({
+  gameId,
+  messages,
+  chatAccessToken,
+  chatLastEventId,
+}: {
+  gameId: string
+  messages: UIMessage[]
+  chatAccessToken: string
+  /** Left as it is when the turn ended without one. */
+  chatLastEventId: string | undefined
+}): Promise<void> {
+  await db
+    .update(games)
+    .set({ messages, chatAccessToken, chatLastEventId })
+    .where(eq(games.id, gameId))
 }
 
 /**

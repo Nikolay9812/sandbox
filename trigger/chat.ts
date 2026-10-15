@@ -1,31 +1,23 @@
-import { chat } from "@trigger.dev/sdk/ai"
-import {
-  createUIMessageStream,
-  stepCountIs,
-  streamText,
-  type StepResult,
-  type ToolSet,
-  type UIMessage,
-  type UIMessageStreamOptions,
-} from "ai"
+import { chat, upsertIncomingMessage } from "@trigger.dev/sdk/ai"
+import { stepCountIs, streamText } from "ai"
 import { z } from "zod"
 
-import { chargeStep, getBalance } from "@/lib/billing/ledger"
-import { stepCost } from "@/lib/billing/pricing"
-import { checkCredits } from "@/lib/billing/reconcile"
+import {
+  chargeStep,
+  hasCreditsToBuild,
+  OUT_OF_CREDITS,
+} from "@/lib/billing/ledger"
+import { priceStep } from "@/lib/billing/pricing"
 import { createGameSandbox } from "@/lib/daytona/utils"
 import { gameModelSettings } from "@/lib/games/agent"
 import {
-  gameTranscriptStorage,
+  loadGameMessages,
   loadGameOrgId,
-  saveGameChatToken,
+  saveGameMessages,
+  saveGameTurn,
 } from "@/lib/games/chat-store"
 import { gameInstructions } from "@/lib/games/instructions"
-import {
-  DEFAULT_GAME_MODEL_ID,
-  GAME_MODELS,
-  type GameModelId,
-} from "@/lib/games/model-catalog"
+import { DEFAULT_GAME_MODEL_ID, GAME_MODELS } from "@/lib/games/model-catalog"
 import { describeError, elapsed, logger } from "@/lib/observability"
 import { createGameTools } from "@/lib/games/tools"
 
@@ -51,8 +43,8 @@ const MAX_STEPS = 48
  * A game's chat thread, run as one long-lived task per conversation.
  *
  * A game owns exactly one thread and the chat id is the game id, so the
- * `games` row is the thread's storage: `gameTranscriptStorage` loads it when a
- * run boots and the runtime saves every change back to it.
+ * `games` row stays the source of truth for history: `hydrateMessages` reads it
+ * back at the top of every turn instead of trusting the copy the browser holds.
  *
  * Authorization happens before a session can exist, in the server actions in
  * `@/lib/games/chat-actions` — there is no Clerk session in here to scope by.
@@ -60,7 +52,42 @@ const MAX_STEPS = 48
 export const gameChat = chat.agent({
   id: "game-chat",
   clientDataSchema: gameClientDataSchema,
-  storage: gameTranscriptStorage,
+  hydrateMessages: async ({ chatId, trigger, incomingMessages }) => {
+    const startedAt = performance.now()
+    const stored = await loadGameMessages(chatId)
+
+    // Appends a genuinely new user message and no-ops otherwise. A new game is
+    // created with its opening prompt already stored, and the client replays
+    // that same message to ask for the first reply — this dedupes it by id.
+    //
+    // Nothing is written here, deliberately. The turn that answers an
+    // `ask_player` question arrives as a state advance on a message this row
+    // already holds, which is exactly the case this no-ops on, and the runtime
+    // only overlays that advance onto the chain *after* this hook returns — so
+    // a write from here could never carry the answer. `onTurnStart` persists
+    // the merged chain instead, which covers both cases in one statement.
+    const appended = upsertIncomingMessage(stored, {
+      trigger,
+      incomingMessages,
+    })
+
+    // The top of every turn, and the one place the thread's size is visible.
+    // Message *counts*, never message content: the thread is the player's
+    // prompts and the agent's game source, both of which stay out of Sentry.
+    //
+    // `appended: false` on what should be a new turn is the signature of the
+    // dedupe swallowing a real message, which would look to the player like the
+    // agent replying to the message before theirs.
+    logger.info(logger.fmt`Chat turn starting for game ${chatId}`, {
+      "game.id": chatId,
+      "chat.stored_messages": stored.length,
+      "chat.incoming_messages": incomingMessages.length,
+      "chat.appended_incoming": appended,
+      duration_ms: elapsed(startedAt),
+    })
+
+    return stored
+  },
   // Fires once per game, on the first message of its thread — so the sandbox
   // is created exactly once and is already seeded before `run` streams a reply.
   onChatStart: async ({ chatId }) => {
@@ -80,22 +107,87 @@ export const gameChat = chat.agent({
       throw error
     }
   },
-  // A continuation run mints a fresh session token, and a reloading browser
-  // resumes the chat with whatever the row holds — so it is refreshed here, at
-  // the top of every turn, before anything streams.
-  onTurnStart: async ({ chatId, chatAccessToken, uiMessages, turn }) => {
-    await saveGameChatToken({ gameId: chatId, chatAccessToken })
+  // Every turn, and the last point before it starts streaming: the thread is
+  // written down here, and then the turn is either paid for or refused.
+  onTurnStart: async ({ chatId, uiMessages }) => {
+    // The thread as the runtime has it, which on the turn that answers an
+    // `ask_player` question is the only place the player's answer exists yet:
+    // the browser ships it as a state advance on a message this row already
+    // holds, and the runtime overlays it between `hydrateMessages` and here.
+    //
+    // Written before the turn rather than after it, because the turn it opens
+    // is a build that runs for minutes — and until this lands, a reload reads
+    // the row back and puts the same question to the player a second time. A
+    // turn that is refused below, or that dies part way, never reaches
+    // `onTurnComplete` and would otherwise leave the answer nowhere.
+    await saveGameMessages({ gameId: chatId, messages: uiMessages })
 
-    // The top of every turn, and the one place the thread's size is visible.
-    // Message *counts*, never message content: the thread is the player's
-    // prompts and the agent's game source, both of which stay out of Sentry.
-    logger.info(logger.fmt`Chat turn starting for game ${chatId}`, {
+    // Checked on every turn, including the first turn of a continuation run —
+    // which is where `onChatStart` would have missed it. The session-start
+    // check in `@/lib/games/chat-actions` is the other half: this one catches
+    // the thread that was affordable when it opened and is not any more.
+    //
+    // Deliberately *not* per step. A turn that has started is paid for to the
+    // end, overdraft and all, because a game abandoned mid-write has cost the
+    // same and left nothing to show for it.
+    const orgId = await loadGameOrgId(chatId)
+
+    // No row, no owner to bill and nothing to check against. The turn will
+    // fail on its own further down for the same reason.
+    if (!orgId) {
+      return
+    }
+
+    if (await hasCreditsToBuild(orgId)) {
+      return
+    }
+
+    logger.info(logger.fmt`Refused a turn for game ${chatId} — no credits`, {
       "game.id": chatId,
-      "chat.turn": turn,
-      "chat.messages": uiMessages.length,
+      "organization.id": orgId,
     })
+
+    // Thrown, not written: the turn loop turns this into an error chunk, closes
+    // the turn, and leaves the session alive for the next message — so the
+    // player reads the reason in the thread and can carry on the moment they
+    // top up. The message is shown to them verbatim, so it says something a
+    // player can act on rather than something only a log would want.
+    throw new Error(OUT_OF_CREDITS)
   },
-  onTurnComplete: async ({ chatId, uiMessages, lastEventId, clientData }) => {
+  onTurnComplete: async ({
+    chatId,
+    uiMessages,
+    chatAccessToken,
+    lastEventId,
+    clientData,
+  }) => {
+    const startedAt = performance.now()
+
+    try {
+      await saveGameTurn({
+        gameId: chatId,
+        messages: uiMessages,
+        chatAccessToken,
+        chatLastEventId: lastEventId,
+      })
+    } catch (error) {
+      // The turn's work is already in the sandbox by now; this is the write
+      // that makes it survive a reload. Losing it strands the thread on the
+      // previous turn's cursor, which is the one failure here that the player
+      // sees and the agent doesn't.
+      logger.error(
+        logger.fmt`Could not persist the finished turn for game ${chatId}`,
+        {
+          "game.id": chatId,
+          "chat.messages": uiMessages.length,
+          "chat.has_cursor": lastEventId !== undefined,
+          ...describeError(error),
+        }
+      )
+
+      throw error
+    }
+
     // Pairs with the `Chat turn starting` log above: one of each per turn, so a
     // turn that began and never ended is a gap rather than something to infer.
     logger.info(logger.fmt`Chat turn complete for game ${chatId}`, {
@@ -105,6 +197,7 @@ export const gameChat = chat.agent({
       // A turn that ends with no cursor cannot be resumed, so a reload
       // replays it — worth being able to count.
       "chat.has_cursor": lastEventId !== undefined,
+      duration_ms: elapsed(startedAt),
     })
   },
   // Resolved per turn rather than declared once, because the tools have to
@@ -114,7 +207,13 @@ export const gameChat = chat.agent({
   // only passed there: history re-converted at the top of a later turn needs
   // the same set to make sense of the tool calls already in it.
   tools: ({ chatId }) => createGameTools(chatId),
-  run: async ({ chatId, messages, tools, signal, clientData }) => {
+  run: async ({ messages, tools, signal, clientData, chatId }) => {
+    // Read per turn rather than fixed for the thread, so switching models
+    // mid-conversation takes effect on the next message and carries the history
+    // with it. Named here rather than inline because the same choice decides
+    // what the turn runs on and what it is billed at.
+    const modelId = clientData?.modelId ?? DEFAULT_GAME_MODEL_ID
+
     // A turn with nothing to answer. The history ends on the agent's own reply,
     // which means whatever opened this turn added no message to it — a thread
     // submitted twice, or a tab asking for a reply it has already been given.
@@ -135,36 +234,18 @@ export const gameChat = chat.agent({
       return
     }
 
-    const modelId = clientData?.modelId ?? DEFAULT_GAME_MODEL_ID
-    // Looked up per turn, since the game id is all the session carries. Taken
-    // from the game's row rather than `clientData`, which the browser writes.
+    // Resolved once for the turn rather than per step: the owner of a game
+    // cannot change mid-turn, and a lookup inside `onStepEnd` would repeat it
+    // up to `MAX_STEPS` times.
     const orgId = await loadGameOrgId(chatId)
-
-    // Checked once per turn, before the model is called: a turn that starts
-    // with credit runs to the end even if its steps take the balance below
-    // zero, and the next one is refused here.
-    if (orgId) {
-      const { hasCredits, balance } = await checkCredits(orgId)
-      if (!hasCredits) {
-        logger.info(logger.fmt`Chat turn refused for game ${chatId}`, {
-          "game.id": chatId,
-          "org.id": orgId,
-          "billing.balance": balance,
-        })
-
-        return fixedReply(OUT_OF_CREDITS_REPLY)
-      }
-    }
 
     return streamText({
       // Spread first, so every option below still wins. Wires up the
       // `prepareStep` behind compaction, steering and background injection —
       // all of which silently no-op without it.
       ...chat.toStreamTextOptions({ tools }),
-      // Read per turn rather than fixed for the thread, so switching models
-      // mid-conversation takes effect on the next message and carries the
-      // history with it. Spread rather than assigned because what varies with
-      // the model is `model` today and may not be only that later.
+      // Spread rather than assigned because what varies with the model is
+      // `model` today and may not be only that later.
       ...gameModelSettings(modelId),
       // `instructions`, not the deprecated `system`. Passed here rather than
       // through `chat.prompt.set()` because the prompt is static — there is no
@@ -174,98 +255,39 @@ export const gameChat = chat.agent({
       // Fires on stop and on cancel. Without it, Stop only updates the UI.
       abortSignal: signal,
       stopWhen: stepCountIs(MAX_STEPS),
-      // Every model call is paid for as soon as it ends, so a long build draws
-      // the balance down as it goes rather than all at once at the end.
-      onStepEnd: (step) => billStep({ gameId: chatId, orgId, modelId, step }),
+      // Per step rather than per turn, so a build that runs for minutes bills
+      // as it goes: the sidebar drops while the game is still being written,
+      // and a turn that crashes or is stopped halfway has still paid for the
+      // steps that ran. `onStepEnd`, not the deprecated `onStepFinish`.
+      onStepEnd: async ({ usage, response }) => {
+        if (!orgId) {
+          return
+        }
+
+        try {
+          await chargeStep({
+            orgId,
+            responseId: response.id,
+            amount: priceStep({ modelId, usage }),
+          })
+        } catch (error) {
+          // Deliberately swallowed. This runs between steps of a turn the
+          // player is watching, and a ledger that is briefly short a row is a
+          // better outcome than a build that dies halfway through writing a
+          // game. The row is not recoverable afterwards, though, so an org
+          // billed less than it used shows up here and nowhere else.
+          logger.error(
+            logger.fmt`Could not charge a step for game ${chatId}`,
+            {
+              "game.id": chatId,
+              "organization.id": orgId,
+              "gen_ai.request.model": modelId,
+              "gen_ai.response.id": response.id,
+              ...describeError(error),
+            }
+          )
+        }
+      },
     })
   },
 })
-
-const OUT_OF_CREDITS_REPLY =
-  "You're out of credits, so I can't keep building for now. Add credits on the Billing page, then send your message again."
-
-/**
- * A reply written by the app instead of the model.
- *
- * Shaped like what `streamText` returns as far as `chat.agent` is concerned,
- * which is `toUIMessageStream` and nothing else, so the runtime pipes it and
- * saves it to the thread exactly as it would a model's answer: the player sees
- * it in the chat, and it is still there after a reload.
- */
-function fixedReply(text: string) {
-  return {
-    toUIMessageStream: (options: UIMessageStreamOptions<UIMessage> = {}) =>
-      createUIMessageStream({
-        originalMessages: options.originalMessages,
-        generateId: options.generateMessageId,
-        onEnd: options.onEnd ?? options.onFinish,
-        execute: ({ writer }) => {
-          writer.write({ type: "start" })
-          writer.write({ type: "text-start", id: "reply" })
-          writer.write({ type: "text-delta", id: "reply", delta: text })
-          writer.write({ type: "text-end", id: "reply" })
-          writer.write({ type: "finish", finishReason: "stop" })
-        },
-      }),
-  }
-}
-
-/**
- * Charges one step to the game's org and tells the browser the new balance.
- *
- * A failure is logged rather than thrown: the step has already run and its
- * edits are in the sandbox, so failing the turn over the bill would only lose
- * the player's build without un-spending anything.
- */
-async function billStep({
-  gameId,
-  orgId,
-  modelId,
-  step,
-}: {
-  gameId: string
-  orgId: string | undefined
-  modelId: GameModelId
-  step: StepResult<ToolSet>
-}) {
-  const attributes = {
-    "game.id": gameId,
-    "gen_ai.request.model": modelId,
-    "gen_ai.response.id": step.response.id,
-  }
-
-  if (!orgId) {
-    logger.warn(
-      logger.fmt`Game ${gameId} has no org to charge a step to`,
-      attributes
-    )
-    return
-  }
-
-  const startedAt = performance.now()
-  try {
-    const amount = stepCost(modelId, step.usage)
-    await chargeStep({ orgId, responseId: step.response.id, amount })
-    const balance = await getBalance(orgId)
-
-    // Transient: the sidebar wants the latest number, and the thread has no
-    // use for a trail of old balances in its history.
-    chat.response.write({
-      type: "data-balance",
-      data: { balance },
-      transient: true,
-    })
-
-    logger.info(logger.fmt`Charged a step for game ${gameId}`, {
-      ...attributes,
-      "billing.amount": amount,
-      "billing.balance": balance,
-      duration_ms: elapsed(startedAt),
-    })
-  } catch (error) {
-    logger.error(logger.fmt`Could not charge a step for game ${gameId}`, {
-      ...attributes,
-      ...describeError(error),
-    })
-  }
-}

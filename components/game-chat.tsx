@@ -2,6 +2,7 @@
 
 import type { ChatSessionPersistedState } from "@trigger.dev/sdk/chat"
 import type { UIMessage } from "ai"
+import { useRouter } from "next/navigation"
 import { useCallback, useState } from "react"
 
 import { ChatPreview } from "@/components/chat-preview"
@@ -15,12 +16,15 @@ import type { GameModelId } from "@/lib/games/model-catalog"
 
 export function GameChat({
   gameId,
+  credits,
   initialMessages,
   initialModelId,
   initialSession,
   sandboxId,
 }: {
   gameId: string
+  /** The org's balance as of this render, in ledger units. */
+  credits: bigint
   initialMessages: UIMessage[]
   /** The model this thread opens on — see `GamePage` for where it comes from. */
   initialModelId: GameModelId
@@ -39,14 +43,21 @@ export function GameChat({
   // is therefore only the starting answer, not the standing one.
   const [hasSandbox, setHasSandbox] = useState(sandboxId !== null)
 
+  const router = useRouter()
+
   const handleTurnComplete = useCallback(() => {
     setPreviewRevision((revision) => revision + 1)
     setHasSandbox(true)
-  }, [])
+    // The turn has been charged by now, so a fresh render is how the balance
+    // reaches both the sidebar and the thread's out-of-credits check. It
+    // re-renders in place rather than remounting, so the thread keeps its state.
+    router.refresh()
+  }, [router])
 
   const thread = (
     <ChatThread
       gameId={gameId}
+      credits={credits}
       initialMessages={initialMessages}
       initialModelId={initialModelId}
       initialSession={initialSession}

@@ -9,7 +9,7 @@ import {
   type ChatStartSessionResult,
 } from "@trigger.dev/sdk/ai"
 
-import { checkCredits } from "@/lib/billing/reconcile"
+import { hasCreditsToBuild, OUT_OF_CREDITS } from "@/lib/billing/ledger"
 import { getGame } from "@/lib/games/queries"
 import type { gameChat } from "@/trigger/chat"
 
@@ -56,25 +56,23 @@ async function authorizeGame(gameId: string): Promise<{ orgId: string }> {
  * session-scoped token. Idempotent on (environment, chatId), so two tabs
  * converge on one session.
  *
- * An org out of credits gets `{ outOfCredits: true }` instead, and no run is
- * triggered. Returned rather than thrown, because Next replaces a server
- * action's error with a generic one in production, and the thread needs to
- * tell this apart from a real failure to show the player why nothing happened.
+ * An org out of credits is refused before any run is triggered. The thread
+ * doesn't rely on the error's message to explain it — Next replaces a server
+ * action's error with a generic one in production — because it already knows
+ * the balance and says so itself.
  */
 export async function startGameChatSession(
   params: ChatStartSessionParams<typeof gameChat>
-): Promise<ChatStartSessionResult | { outOfCredits: true }> {
+): Promise<ChatStartSessionResult> {
   const { orgId } = await authorizeGame(params.chatId)
 
-  const { hasCredits, balance } = await checkCredits(orgId)
-  if (!hasCredits) {
+  if (!(await hasCreditsToBuild(orgId))) {
     Sentry.logger.info("Game chat session refused, out of credits", {
       "game.id": params.chatId,
-      "org.id": orgId,
-      "billing.balance": balance,
+      "organization.id": orgId,
     })
 
-    return { outOfCredits: true }
+    throw new Error(OUT_OF_CREDITS)
   }
 
   const session = await startSession(params)

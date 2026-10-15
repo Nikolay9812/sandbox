@@ -38,7 +38,13 @@ const perToken = (dollarsPerMillion: number) =>
   Math.round((dollarsPerMillion * DOLLAR) / 1_000_000)
 
 /** What one step's token usage cost, in ledger units. */
-export function stepCost(modelId: GameModelId, usage: LanguageModelUsage) {
+export function priceStep({
+  modelId,
+  usage,
+}: {
+  modelId: GameModelId
+  usage: LanguageModelUsage
+}) {
   const prices = PRICES_PER_MILLION[modelId]
   const cacheRead = usage.inputTokenDetails.cacheReadTokens ?? 0
   const cacheWrite = usage.inputTokenDetails.cacheWriteTokens ?? 0

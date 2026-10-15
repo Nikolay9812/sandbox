@@ -5,11 +5,20 @@
 import { eq, sql } from "drizzle-orm"
 
 import { DOLLAR } from "@/lib/billing/format"
+import { reconcileCredits } from "@/lib/billing/reconcile"
 import { creditLedger, db } from "@/lib/db/client"
+import { describeError, logger } from "@/lib/observability"
 
 // Every org starts with this much. It is not a row: the ledger only records
 // what changed, so an org with no rows still has it.
 const FREE_CREDIT = 1 * DOLLAR
+
+/**
+ * Why a turn was refused. Shown to the player verbatim, so it says what to do
+ * rather than what went wrong.
+ */
+export const OUT_OF_CREDITS =
+  "You're out of credits. Add more from the billing page to keep building."
 
 /** The org's available credit in ledger units. May be negative. */
 export async function getBalance(orgId: string): Promise<number> {
@@ -22,6 +31,40 @@ export async function getBalance(orgId: string): Promise<number> {
     .where(eq(creditLedger.orgId, orgId))
 
   return FREE_CREDIT + total
+}
+
+/**
+ * The org's balance, synced with its subscription first if it is empty.
+ *
+ * The month may have renewed since anything last looked, so an empty balance
+ * is not believed until the grants are caught up. A sync that fails leaves the
+ * balance as it was: the org is told it is out of credits rather than handed a
+ * build nobody knows it paid for.
+ */
+export async function getSyncedBalance(orgId: string): Promise<number> {
+  const balance = await getBalance(orgId)
+
+  if (balance > 0) {
+    return balance
+  }
+
+  try {
+    await reconcileCredits(orgId)
+
+    return await getBalance(orgId)
+  } catch (error) {
+    logger.error(logger.fmt`Could not sync credits for org ${orgId}`, {
+      "organization.id": orgId,
+      ...describeError(error),
+    })
+
+    return balance
+  }
+}
+
+/** Whether the org has anything left to start a build with. */
+export async function hasCreditsToBuild(orgId: string): Promise<boolean> {
+  return (await getSyncedBalance(orgId)) > 0
 }
 
 /**
